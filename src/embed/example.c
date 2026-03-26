@@ -1,11 +1,4 @@
-/// example.c — Demonstrates using the Bun embedding API.
-///
-/// This example shows how to:
-///   1. Initialize a Bun runtime
-///   2. Evaluate JavaScript code
-///   3. Register native C functions callable from JS
-///   4. Drive the event loop manually (simulating a GUI main loop)
-///   5. Clean up
+/// example.c — Demonstrates the zero-copy BunValue embedding API.
 ///
 /// Build (assuming bun is built as a shared library):
 ///   cc -o example example.c -L<bun-lib-dir> -lbun -I.
@@ -18,55 +11,64 @@
 #include <unistd.h>
 #include "bun_embed.h"
 
-// ---------------------------------------------------------------------------
-// Example native function: adds two numbers
-// ---------------------------------------------------------------------------
+typedef struct {
+    int value;
+} Counter;
 
-static char *native_add(int argc, const char **argv, void *userdata) {
+static BunValue native_add(BunContext *ctx, int argc, const BunValue *argv, void *userdata) {
+    (void)ctx;
     (void)userdata;
-    if (argc < 2 || !argv[0] || !argv[1]) return NULL;
+    if (argc < 2 || !argv) return BUN_UNDEFINED;
 
-    double a = atof(argv[0]);  // argv[i] are JSON values, numbers are valid JSON
-    double b = atof(argv[1]);
-
-    // Return a JSON number string (caller takes ownership via malloc)
-    char *result = malloc(64);
-    if (!result) return NULL;
-    snprintf(result, 64, "%g", a + b);
-    return result;
+    double a = bun_to_number(ctx, argv[0]);
+    double b = bun_to_number(ctx, argv[1]);
+    return bun_number(a + b);
 }
 
-// ---------------------------------------------------------------------------
-// Example native function: returns a greeting string
-// ---------------------------------------------------------------------------
-
-static char *native_greet(int argc, const char **argv, void *userdata) {
+static BunValue counter_inc(BunContext *ctx, int argc, const BunValue *argv, void *userdata) {
+    (void)argc;
+    (void)argv;
     (void)userdata;
 
-    const char *name = "World";
-    // argv[0] is a JSON string like "\"Alice\"", so skip the quotes
-    char namebuf[128] = {0};
-    if (argc >= 1 && argv[0]) {
-        size_t len = strlen(argv[0]);
-        if (len >= 2 && argv[0][0] == '"' && argv[0][len - 1] == '"') {
-            size_t copylen = len - 2;
-            if (copylen >= sizeof(namebuf)) copylen = sizeof(namebuf) - 1;
-            memcpy(namebuf, argv[0] + 1, copylen);
-            namebuf[copylen] = '\0';
-            name = namebuf;
-        }
+    BunValue self = bun_get(ctx, bun_global(ctx), "counter", 7);
+    Counter *counter = (Counter *)bun_get_internal_ptr(ctx, self);
+    if (!counter) return BUN_UNDEFINED;
+
+    counter->value += 1;
+    return bun_int32(counter->value);
+}
+
+static BunValue counter_get(BunContext *ctx, BunValue this_value) {
+    Counter *counter = (Counter *)bun_get_internal_ptr(ctx, this_value);
+    if (!counter) return BUN_UNDEFINED;
+    return bun_int32(counter->value);
+}
+
+static void counter_set(BunContext *ctx, BunValue this_value, BunValue value) {
+    Counter *counter = (Counter *)bun_get_internal_ptr(ctx, this_value);
+    if (!counter) return;
+    counter->value = bun_to_int32(value);
+}
+
+static BunValue native_greet(BunContext *ctx, int argc, const BunValue *argv, void *userdata) {
+    (void)userdata;
+
+    const char *default_name = "World";
+    const char *name = default_name;
+    char *owned_name = NULL;
+    size_t owned_len = 0;
+
+    if (argc >= 1 && argv) {
+        owned_name = bun_to_utf8(ctx, argv[0], &owned_len);
+        if (owned_name && owned_len > 0) name = owned_name;
     }
 
-    // Return a JSON string (must be a valid JSON value)
-    char *result = malloc(256);
-    if (!result) return NULL;
-    snprintf(result, 256, "\"Hello, %s!\"", name);
-    return result;
-}
+    char buf[256];
+    snprintf(buf, sizeof(buf), "Hello, %s!", name);
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
+    if (owned_name) free(owned_name);
+    return bun_string(ctx, buf, strlen(buf));
+}
 
 int main(void) {
     printf("Initializing Bun runtime...\n");
@@ -77,15 +79,23 @@ int main(void) {
         return 1;
     }
 
-    // Inject native functions
-    if (!bun_register_native_function(rt, "nativeAdd", native_add, NULL)) {
-        fprintf(stderr, "Failed to register nativeAdd\n");
-    }
-    if (!bun_register_native_function(rt, "nativeGreet", native_greet, NULL)) {
-        fprintf(stderr, "Failed to register nativeGreet\n");
-    }
+    BunContext *ctx = bun_context(rt);
+    BunValue global = bun_global(ctx);
 
-    // Evaluate some JavaScript
+    BunValue add_fn = bun_function(ctx, "nativeAdd", native_add, NULL, 2);
+    BunValue greet_fn = bun_function(ctx, "nativeGreet", native_greet, NULL, 1);
+
+    bun_set(ctx, global, "nativeAdd", 9, add_fn);
+    bun_set(ctx, global, "nativeGreet", 11, greet_fn);
+
+    Counter counter = { .value = 10 };
+    BunValue counter_obj = bun_object(ctx);
+    BunValue inc_fn = bun_function(ctx, "inc", counter_inc, NULL, 0);
+    bun_set_internal_ptr(ctx, counter_obj, &counter);
+    bun_set(ctx, counter_obj, "inc", 3, inc_fn);
+    bun_define_accessor(ctx, counter_obj, "value", 5, counter_get, counter_set, 0, 0, 0);
+    bun_set(ctx, global, "counter", 7, counter_obj);
+
     printf("\n--- Evaluating JS ---\n");
     BunEvalResult r;
 
@@ -96,6 +106,14 @@ int main(void) {
     if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
 
     r = bun_eval_string(rt, "console.log(nativeGreet('Bun'))");
+    if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
+
+    r = bun_eval_string(rt,
+        "console.log('counter.value =', counter.value);"
+        "counter.value = 42;"
+        "console.log('counter.inc() =', counter.inc());"
+        "console.log('counter.value =', counter.value);"
+    );
     if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
 
     // Schedule a timer to demonstrate event loop integration
@@ -109,7 +127,6 @@ int main(void) {
     );
     if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
 
-    // Simulate a GUI main loop: poll the event loop until idle
     printf("\n--- Running event loop ---\n");
     for (int i = 0; i < 100; i++) {
         int has_pending = bun_run_pending_jobs(rt);
@@ -120,7 +137,6 @@ int main(void) {
         usleep(50000);  // 50ms - simulate frame rate
     }
 
-    // Clean up
     printf("\nDestroying Bun runtime...\n");
     bun_destroy(rt);
 

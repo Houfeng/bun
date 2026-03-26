@@ -1,22 +1,34 @@
-///! bun_embed.zig — Minimal C API for embedding Bun's JS runtime into a host application.
-///! See bun_embed.h for the C API documentation.
+///! bun_embed.zig — High-performance C API for embedding Bun's JS runtime.
+///! See bun_embed.h for API documentation.
 const std = @import("std");
 const bun = @import("bun");
 const jsc = bun.jsc;
-const uws = bun.uws;
 const js_ast = bun.ast;
-const logger = bun.logger;
 const Arena = bun.allocators.MimallocArena;
 const VirtualMachine = jsc.VirtualMachine;
 const JSGlobalObject = jsc.JSGlobalObject;
 const JSValue = jsc.JSValue;
 const JSModuleLoader = jsc.JSModuleLoader;
-const EventLoop = jsc.EventLoop;
 const Environment = bun.Environment;
-const Output = bun.Output;
-const Config = @import("../bun.js/config.zig");
 const api = bun.schema.api;
-const DNSResolver = bun.api.dns.Resolver;
+
+const BunValue = u64;
+const BunContext = opaque {};
+
+const BunHostFn = *const fn (?*BunContext, c_int, ?[*]const BunValue, ?*anyopaque) callconv(.c) BunValue;
+const BunGetterFn = *const fn (?*BunContext, BunValue) callconv(.c) BunValue;
+const BunSetterFn = *const fn (?*BunContext, BunValue, BunValue) callconv(.c) void;
+
+const HostFnData = struct {
+    native_fn: BunHostFn,
+    userdata: ?*anyopaque,
+};
+
+const PendingCall = struct {
+    fn_value: BunValue,
+    this_value: BunValue,
+    argv: []BunValue,
+};
 
 /// Opaque runtime handle exposed to C as `BunRuntime*`.
 const BunRuntime = struct {
@@ -24,6 +36,8 @@ const BunRuntime = struct {
     arena: Arena,
     /// Scratch buffer for returning error strings to C callers. Valid until next eval call.
     last_error_buf: ?[*:0]u8 = null,
+    pending_calls: std.ArrayListUnmanaged(PendingCall) = .{},
+    pending_calls_mutex: std.Thread.Mutex = .{},
 
     fn captureException(runtime: *BunRuntime, global: *JSGlobalObject, value: JSValue) BunEvalResult {
         // Try to get a string representation via toString()
@@ -52,6 +66,16 @@ const BunRuntime = struct {
             runtime.last_error_buf = null;
         }
     }
+
+    fn freePendingCalls(runtime: *BunRuntime) void {
+        runtime.pending_calls_mutex.lock();
+        defer runtime.pending_calls_mutex.unlock();
+
+        for (runtime.pending_calls.items) |call| {
+            bun.default_allocator.free(call.argv);
+        }
+        runtime.pending_calls.deinit(bun.default_allocator);
+    }
 };
 
 /// Result struct matching the C BunEvalResult layout.
@@ -59,6 +83,47 @@ const BunEvalResult = extern struct {
     success: c_int,
     @"error": ?[*:0]const u8,
 };
+
+var hostFnRegistry: HostFnMap = .{};
+const HostFnMap = std.AutoHashMapUnmanaged(JSValue, *HostFnData);
+
+fn toBunValue(value: JSValue) BunValue {
+    return @as(BunValue, @bitCast(@as(i64, @intFromEnum(value))));
+}
+
+fn toJSValue(value: BunValue) JSValue {
+    return @as(JSValue, @enumFromInt(@as(i64, @bitCast(value))));
+}
+
+fn toGlobal(ctx: ?*BunContext) ?*JSGlobalObject {
+    return if (ctx) |ptr| @ptrCast(ptr) else null;
+}
+
+extern fn BunString__createUTF8ForJS(globalObject: *JSGlobalObject, ptr: [*]const u8, length: usize) JSValue;
+
+extern fn JSFunction__createFromZig(
+    global: *JSGlobalObject,
+    fn_name: bun.String,
+    implementation: *const jsc.JSHostFn,
+    arg_count: u32,
+    implementation_visibility: u8,
+    intrinsic: u8,
+    constructor: ?*const jsc.JSHostFn,
+) JSValue;
+
+extern fn BunEmbed__defineCustomAccessor(
+    global: *JSGlobalObject,
+    object: JSValue,
+    key_ptr: [*]const u8,
+    key_len: usize,
+    getter: ?BunGetterFn,
+    setter: ?BunSetterFn,
+    flags: u32,
+) bool;
+
+const BUN_ACCESSOR_READ_ONLY: u32 = 1 << 0;
+const BUN_ACCESSOR_DONT_ENUM: u32 = 1 << 1;
+const BUN_ACCESSOR_DONT_DELETE: u32 = 1 << 2;
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -142,8 +207,21 @@ fn initializeImpl(cwd_ptr: ?[*:0]const u8) !?*BunRuntime {
 pub export fn bun_destroy(rt: ?*BunRuntime) callconv(.c) void {
     const runtime = rt orelse return;
     runtime.freeLastError();
+    runtime.freePendingCalls();
+
+    var it = hostFnRegistry.valueIterator();
+    while (it.next()) |item| {
+        bun.default_allocator.destroy(item.*);
+    }
+    hostFnRegistry.deinit(bun.default_allocator);
+
     runtime.vm.onExit();
     bun.default_allocator.destroy(runtime);
+}
+
+pub export fn bun_context(rt: ?*BunRuntime) callconv(.c) ?*BunContext {
+    const runtime = rt orelse return null;
+    return @ptrCast(runtime.vm.global);
 }
 
 // ---------------------------------------------------------------------------
@@ -252,8 +330,36 @@ const TickContext = struct {
     runtime: *BunRuntime,
     has_pending: bool,
 
+    fn drainPendingCalls(runtime: *BunRuntime, global: *JSGlobalObject) void {
+        runtime.pending_calls_mutex.lock();
+        var local_calls = runtime.pending_calls;
+        runtime.pending_calls = .{};
+        runtime.pending_calls_mutex.unlock();
+
+        defer {
+            for (local_calls.items) |call| {
+                bun.default_allocator.free(call.argv);
+            }
+            local_calls.deinit(bun.default_allocator);
+        }
+
+        for (local_calls.items) |call| {
+            const fn_value = toJSValue(call.fn_value);
+            const this_value = toJSValue(call.this_value);
+            const args: []const JSValue = if (call.argv.len == 0)
+                &.{}
+            else
+                @as([*]const JSValue, @ptrCast(call.argv.ptr))[0..call.argv.len];
+
+            _ = fn_value.call(global, this_value, args) catch .js_undefined;
+        }
+    }
+
     pub fn run(this: *TickContext) void {
         const vm = this.runtime.vm;
+
+        drainPendingCalls(this.runtime, vm.global);
+
         // Non-blocking tick: process ready tasks + microtasks
         vm.eventLoop().tick();
 
@@ -287,222 +393,369 @@ pub export fn bun_wakeup(rt: ?*BunRuntime) callconv(.c) void {
 }
 
 // ---------------------------------------------------------------------------
-// Native Function Injection
+// Value Creation
 // ---------------------------------------------------------------------------
 
-/// C callback type: char* (*)(int argc, const char** argv, void* userdata)
-const BunNativeFunction = *const fn (c_int, ?[*]const ?[*:0]const u8, ?*anyopaque) callconv(.c) ?[*:0]u8;
-
-pub export fn bun_register_native_function(
-    rt: ?*BunRuntime,
-    name_ptr: ?[*:0]const u8,
-    native_fn: ?BunNativeFunction,
-    userdata: ?*anyopaque,
-) callconv(.c) c_int {
-    const runtime = rt orelse return 0;
-    const name = if (name_ptr) |p| std.mem.span(p) else return 0;
-    const fn_ptr = native_fn orelse return 0;
-
-    var ctx = InjectContext{
-        .runtime = runtime,
-        .name = name,
-        .native_fn = fn_ptr,
-        .userdata = userdata,
-        .success = false,
-    };
-    runtime.vm.runWithAPILock(InjectContext, &ctx, InjectContext.run);
-    return if (ctx.success) 1 else 0;
+pub export fn bun_bool(value: c_int) callconv(.c) BunValue {
+    return toBunValue(JSValue.jsBoolean(value != 0));
 }
 
-const InjectContext = struct {
-    runtime: *BunRuntime,
-    name: []const u8,
-    native_fn: BunNativeFunction,
-    userdata: ?*anyopaque,
-    success: bool,
+pub export fn bun_number(value: f64) callconv(.c) BunValue {
+    return toBunValue(JSValue.jsDoubleNumber(value));
+}
 
-    pub fn run(this: *InjectContext) void {
-        const vm = this.runtime.vm;
-        const global = vm.global;
+pub export fn bun_int32(value: i32) callconv(.c) BunValue {
+    return toBunValue(JSValue.jsNumberFromInt32(value));
+}
 
-        // Store the context pointer in a NativeCallbackData allocated with default_allocator
-        const cb_data = bun.default_allocator.create(NativeCallbackData) catch return;
-        cb_data.* = .{
-            .native_fn = this.native_fn,
-            .userdata = this.userdata,
-        };
+pub export fn bun_string(ctx: ?*BunContext, utf8: ?[*]const u8, len: usize) callconv(.c) BunValue {
+    const global = toGlobal(ctx) orelse return toBunValue(.js_undefined);
+    const ptr = utf8 orelse "";
+    return toBunValue(BunString__createUTF8ForJS(global, ptr, len));
+}
 
-        // Create a JS function that wraps our C callback
-        const js_fn = jsc.JSFunction.create(
-            global,
-            this.name,
-            nativeCallbackTrampoline,
-            0, // variadic
-            .{},
-        );
+pub export fn bun_object(ctx: ?*BunContext) callconv(.c) BunValue {
+    const global = toGlobal(ctx) orelse return toBunValue(.js_undefined);
+    return toBunValue(JSValue.createEmptyObject(global, 0));
+}
 
-        if (js_fn == .zero) return;
+pub export fn bun_array(ctx: ?*BunContext, len: usize) callconv(.c) BunValue {
+    const global = toGlobal(ctx) orelse return toBunValue(.js_undefined);
+    const value = JSValue.createEmptyArray(global, len) catch return toBunValue(.js_undefined);
+    return toBunValue(value);
+}
 
-        // Store the callback data as internal field via a weak map or property
-        // We use putDirect on the function object to store callback data
-        // Actually, for simplicity, use a static registry keyed by the JSValue
-        nativeCallbackRegistry.put(bun.default_allocator, js_fn, cb_data) catch return;
+pub export fn bun_global(ctx: ?*BunContext) callconv(.c) BunValue {
+    const global = toGlobal(ctx) orelse return toBunValue(.js_undefined);
+    return toBunValue(global.toJSValue());
+}
 
-        // Put the function on globalThis
-        const global_this = global.toJSValue();
-        global_this.put(global, this.name, js_fn);
-
-        this.success = true;
-    }
-};
-
-/// Registry mapping JS function values to their native callback data.
-var nativeCallbackRegistry: NativeCallbackMap = .{};
-const NativeCallbackMap = std.AutoHashMapUnmanaged(jsc.JSValue, *NativeCallbackData);
-
-const NativeCallbackData = struct {
-    native_fn: BunNativeFunction,
-    userdata: ?*anyopaque,
-};
-
-/// Trampoline called by JSC when the injected JS function is invoked.
-fn nativeCallbackTrampoline(global: *JSGlobalObject, callframe: *jsc.CallFrame) bun.JSError!JSValue {
-    // Look up the callback data
+fn hostFnTrampoline(global: *JSGlobalObject, callframe: *jsc.CallFrame) callconv(.c) JSValue {
     const callee = callframe.callee();
-    const cb_data = nativeCallbackRegistry.get(callee) orelse
-        return .js_undefined;
-
+    const cb_data = hostFnRegistry.get(callee) orelse return .js_undefined;
     const args = callframe.arguments();
-    const argc: usize = @min(args.len, 16);
 
-    // Convert JS arguments to JSON strings for the C callback
-    var c_argv_buf: [16]?[*:0]const u8 = @splat(null);
-    var json_strs: [16]bun.String = @splat(bun.String.empty);
-    var utf8_slices: [16]jsc.ZigString.Slice = @splat(.{});
-
-    for (args[0..argc], 0..argc) |arg, i| {
-        // Convert each argument to a JSON string
-        try arg.jsonStringifyFast(global, &json_strs[i]);
-        if (json_strs[i].isEmpty()) {
-            c_argv_buf[i] = "null";
-        } else {
-            // Get a UTF8 slice and null-terminate it
-            utf8_slices[i] = json_strs[i].toUTF8(bun.default_allocator);
-            // Allocate a null-terminated copy for the C callback
-            const slice_data = utf8_slices[i].ptr[0..utf8_slices[i].len];
-            const z = bun.default_allocator.allocSentinel(u8, slice_data.len, 0) catch {
-                c_argv_buf[i] = "null";
-                continue;
-            };
-            @memcpy(z[0..slice_data.len], slice_data);
-            c_argv_buf[i] = z;
-        }
-    }
-
-    // Call the native function
-    const result_ptr = cb_data.native_fn(
-        @intCast(argc),
-        if (argc > 0) &c_argv_buf else null,
+    const result = cb_data.native_fn(
+        @ptrCast(global),
+        @intCast(args.len),
+        if (args.len == 0) null else @as([*]const BunValue, @ptrCast(args.ptr)),
         cb_data.userdata,
     );
-
-    // Clean up JSON strings and allocated null-terminated copies
-    for (0..argc) |i| {
-        if (json_strs[i].isEmpty()) continue;
-        json_strs[i].deref();
-        utf8_slices[i].deinit();
-        // Free the null-terminated copy if it was allocated
-        if (c_argv_buf[i]) |p| {
-            if (p != @as(?[*:0]const u8, "null")) {
-                bun.default_allocator.free(std.mem.span(p));
-            }
-        }
-    }
-
-    // Parse the return value (JSON string from C)
-    if (result_ptr) |ret| {
-        const ret_span = std.mem.span(ret);
-        defer std.c.free(@ptrCast(@constCast(ret)));
-
-        // Create a bun.String from the returned UTF8 JSON, then parse it as JSON
-        var json_str = bun.String.fromBytes(ret_span);
-        return json_str.toJSByParseJSON(global) catch return .js_undefined;
-    }
-
-    return .js_undefined;
+    return toJSValue(result);
 }
 
-pub export fn bun_register_native_function_raw(
-    rt: ?*BunRuntime,
+pub export fn bun_function(
+    ctx: ?*BunContext,
     name_ptr: ?[*:0]const u8,
-    fn_ptr: ?*anyopaque,
+    native_fn: ?BunHostFn,
+    userdata: ?*anyopaque,
     arg_count: c_int,
+) callconv(.c) BunValue {
+    const global = toGlobal(ctx) orelse return toBunValue(.js_undefined);
+    const name = if (name_ptr) |p| std.mem.span(p) else return toBunValue(.js_undefined);
+    const fn_ptr = native_fn orelse return toBunValue(.js_undefined);
+
+    const js_fn = JSFunction__createFromZig(
+        global,
+        bun.String.init(name),
+        hostFnTrampoline,
+        if (arg_count >= 0) @intCast(arg_count) else 0,
+        0,
+        0,
+        null,
+    );
+    if (js_fn == .zero) return toBunValue(.js_undefined);
+
+    const cb_data = bun.default_allocator.create(HostFnData) catch return toBunValue(.js_undefined);
+    cb_data.* = .{
+        .native_fn = fn_ptr,
+        .userdata = userdata,
+    };
+
+    hostFnRegistry.put(bun.default_allocator, js_fn, cb_data) catch {
+        bun.default_allocator.destroy(cb_data);
+        return toBunValue(.js_undefined);
+    };
+
+    return toBunValue(js_fn);
+}
+
+// ---------------------------------------------------------------------------
+// Value Introspection & Conversion
+// ---------------------------------------------------------------------------
+
+pub export fn bun_is_undefined(value: BunValue) callconv(.c) c_int {
+    return if (toJSValue(value).isUndefined()) 1 else 0;
+}
+
+pub export fn bun_is_null(value: BunValue) callconv(.c) c_int {
+    return if (toJSValue(value).isNull()) 1 else 0;
+}
+
+pub export fn bun_is_bool(value: BunValue) callconv(.c) c_int {
+    return if (toJSValue(value).isBoolean()) 1 else 0;
+}
+
+pub export fn bun_is_number(value: BunValue) callconv(.c) c_int {
+    return if (toJSValue(value).isNumber()) 1 else 0;
+}
+
+pub export fn bun_is_string(value: BunValue) callconv(.c) c_int {
+    return if (toJSValue(value).isString()) 1 else 0;
+}
+
+pub export fn bun_is_object(value: BunValue) callconv(.c) c_int {
+    return if (toJSValue(value).isObject()) 1 else 0;
+}
+
+pub export fn bun_is_callable(value: BunValue) callconv(.c) c_int {
+    return if (toJSValue(value).isCallable()) 1 else 0;
+}
+
+pub export fn bun_to_bool(value: BunValue) callconv(.c) c_int {
+    return if (toJSValue(value).toBoolean()) 1 else 0;
+}
+
+pub export fn bun_to_number(ctx: ?*BunContext, value: BunValue) callconv(.c) f64 {
+    const global = toGlobal(ctx) orelse return std.math.nan(f64);
+    return toJSValue(value).toNumber(global) catch std.math.nan(f64);
+}
+
+pub export fn bun_to_int32(value: BunValue) callconv(.c) i32 {
+    return toJSValue(value).toInt32();
+}
+
+pub export fn bun_to_utf8(ctx: ?*BunContext, value: BunValue, out_len: ?*usize) callconv(.c) ?[*:0]u8 {
+    const global = toGlobal(ctx) orelse return null;
+    const slice = toJSValue(value).toSlice(global, bun.default_allocator) catch return null;
+    defer slice.deinit();
+
+    const out_ptr = std.c.malloc(slice.len + 1) orelse return null;
+    const out_buf: [*]u8 = @ptrCast(out_ptr);
+    if (slice.len > 0) {
+        @memcpy(out_buf[0..slice.len], slice.ptr[0..slice.len]);
+    }
+    out_buf[slice.len] = 0;
+
+    if (out_len) |len_ptr| {
+        len_ptr.* = slice.len;
+    }
+
+    return @ptrCast(out_buf);
+}
+
+// ---------------------------------------------------------------------------
+// Object & Property Operations
+// ---------------------------------------------------------------------------
+
+pub export fn bun_set(
+    ctx: ?*BunContext,
+    object: BunValue,
+    key_ptr: ?[*]const u8,
+    key_len: usize,
+    value: BunValue,
+) callconv(.c) c_int {
+    const global = toGlobal(ctx) orelse return 0;
+    const key = if (key_ptr) |p| p[0..key_len] else return 0;
+    const obj = toJSValue(object);
+    if (!obj.isObject()) return 0;
+
+    obj.put(global, key, toJSValue(value));
+    return 1;
+}
+
+pub export fn bun_get(
+    ctx: ?*BunContext,
+    object: BunValue,
+    key_ptr: ?[*]const u8,
+    key_len: usize,
+) callconv(.c) BunValue {
+    const global = toGlobal(ctx) orelse return toBunValue(.js_undefined);
+    const key = if (key_ptr) |p| p[0..key_len] else return toBunValue(.js_undefined);
+    const obj = toJSValue(object);
+    if (!obj.isObject()) return toBunValue(.js_undefined);
+
+    const value = obj.getPropertyValue(global, key) catch return toBunValue(.js_undefined);
+    return if (value) |v| toBunValue(v) else toBunValue(.js_undefined);
+}
+
+pub export fn bun_set_index(
+    ctx: ?*BunContext,
+    object: BunValue,
+    index: u32,
+    value: BunValue,
+) callconv(.c) c_int {
+    const global = toGlobal(ctx) orelse return 0;
+    const obj = toJSValue(object);
+    if (!obj.isObject()) return 0;
+
+    obj.putIndex(global, index, toJSValue(value)) catch return 0;
+    return 1;
+}
+
+pub export fn bun_get_index(ctx: ?*BunContext, object: BunValue, index: u32) callconv(.c) BunValue {
+    const global = toGlobal(ctx) orelse return toBunValue(.js_undefined);
+    const obj = toJSValue(object);
+    if (!obj.isObject()) return toBunValue(.js_undefined);
+
+    const value = obj.getIndex(global, index) catch return toBunValue(.js_undefined);
+    return toBunValue(value);
+}
+
+pub export fn bun_define_accessor(
+    ctx: ?*BunContext,
+    object: BunValue,
+    key_ptr: ?[*]const u8,
+    key_len: usize,
+    getter: ?BunGetterFn,
+    setter: ?BunSetterFn,
+    read_only: c_int,
+    dont_enum: c_int,
+    dont_delete: c_int,
+) callconv(.c) c_int {
+    const global = toGlobal(ctx) orelse return 0;
+    const key = key_ptr orelse return 0;
+
+    var flags: u32 = 0;
+    if (read_only != 0) flags |= BUN_ACCESSOR_READ_ONLY;
+    if (dont_enum != 0) flags |= BUN_ACCESSOR_DONT_ENUM;
+    if (dont_delete != 0) flags |= BUN_ACCESSOR_DONT_DELETE;
+
+    return if (BunEmbed__defineCustomAccessor(global, toJSValue(object), key, key_len, getter, setter, flags)) 1 else 0;
+}
+
+const internal_ptr_key = "__bun_internal_ptr__";
+
+pub export fn bun_set_internal_ptr(ctx: ?*BunContext, object: BunValue, ptr: ?*anyopaque) callconv(.c) void {
+    const global = toGlobal(ctx) orelse return;
+    const obj = toJSValue(object);
+    if (!obj.isObject()) return;
+
+    const addr = if (ptr) |p| @intFromPtr(p) else 0;
+    obj.put(global, internal_ptr_key, JSValue.fromPtrAddress(addr));
+}
+
+pub export fn bun_get_internal_ptr(ctx: ?*BunContext, object: BunValue) callconv(.c) ?*anyopaque {
+    const global = toGlobal(ctx) orelse return null;
+    const obj = toJSValue(object);
+    if (!obj.isObject()) return null;
+
+    const value = obj.getPropertyValue(global, internal_ptr_key) catch return null;
+    const ptr_value = value orelse return null;
+    if (!ptr_value.isNumber()) return null;
+
+    const addr = ptr_value.asPtrAddress();
+    if (addr == 0) return null;
+    return @ptrFromInt(addr);
+}
+
+// ---------------------------------------------------------------------------
+// Function Call & GC Lifetime
+// ---------------------------------------------------------------------------
+
+pub export fn bun_call(
+    ctx: ?*BunContext,
+    fn_value: BunValue,
+    this_value: BunValue,
+    argc: c_int,
+    argv: ?[*]const BunValue,
+) callconv(.c) BunValue {
+    const global = toGlobal(ctx) orelse return toBunValue(.js_undefined);
+    const function = toJSValue(fn_value);
+    if (!function.isCallable()) return toBunValue(.js_undefined);
+
+    const argc_u: usize = if (argc > 0) @intCast(argc) else 0;
+    const args: []const JSValue = if (argc_u == 0)
+        &.{}
+    else if (argv) |p|
+        @as([*]const JSValue, @ptrCast(p))[0..argc_u]
+    else
+        return toBunValue(.js_undefined);
+
+    const result = function.call(global, toJSValue(this_value), args) catch return toBunValue(.js_undefined);
+    return toBunValue(result);
+}
+
+pub export fn bun_call_async(
+    rt: ?*BunRuntime,
+    fn_value: BunValue,
+    this_value: BunValue,
+    argc: c_int,
+    argv: ?[*]const BunValue,
 ) callconv(.c) c_int {
     const runtime = rt orelse return 0;
-    const name = if (name_ptr) |p| std.mem.span(p) else return 0;
-    const raw_fn = fn_ptr orelse return 0;
+    const argc_u: usize = if (argc > 0) @intCast(argc) else 0;
 
-    var ctx = InjectRawContext{
-        .runtime = runtime,
-        .name = name,
-        .raw_fn = @ptrCast(@alignCast(raw_fn)),
-        .arg_count = if (arg_count >= 0) @intCast(arg_count) else 0,
-        .success = false,
+    var arg_copy: []BunValue = &.{};
+    if (argc_u > 0) {
+        const src = argv orelse return 0;
+        arg_copy = bun.default_allocator.alloc(BunValue, argc_u) catch return 0;
+        @memcpy(arg_copy, src[0..argc_u]);
+    }
+
+    runtime.pending_calls_mutex.lock();
+    defer runtime.pending_calls_mutex.unlock();
+
+    runtime.pending_calls.append(bun.default_allocator, .{
+        .fn_value = fn_value,
+        .this_value = this_value,
+        .argv = arg_copy,
+    }) catch {
+        if (arg_copy.len > 0) bun.default_allocator.free(arg_copy);
+        return 0;
     };
-    runtime.vm.runWithAPILock(InjectRawContext, &ctx, InjectRawContext.run);
-    return if (ctx.success) 1 else 0;
+
+    if (runtime.vm.event_loop_handle) |loop| {
+        loop.wakeup();
+    }
+
+    return 1;
 }
 
-/// Extern declaration for creating JSFunction with a runtime function pointer.
-extern fn JSFunction__createFromZig(
-    global: *JSGlobalObject,
-    fn_name: bun.String,
-    implementation: *const jsc.JSHostFn,
-    arg_count: u32,
-    implementation_visibility: u8,
-    intrinsic: u8,
-    constructor: ?*const jsc.JSHostFn,
-) JSValue;
+pub export fn bun_protect(_: ?*BunContext, value: BunValue) callconv(.c) void {
+    toJSValue(value).protect();
+}
 
-const InjectRawContext = struct {
-    runtime: *BunRuntime,
-    name: []const u8,
-    raw_fn: *const jsc.JSHostFn,
-    arg_count: u32,
-    success: bool,
-
-    pub fn run(this: *InjectRawContext) void {
-        const vm = this.runtime.vm;
-        const global = vm.global;
-
-        const js_fn = JSFunction__createFromZig(
-            global,
-            bun.String.init(this.name),
-            this.raw_fn,
-            this.arg_count,
-            0, // public
-            0, // no intrinsic
-            null,
-        );
-
-        if (js_fn == .zero) return;
-
-        const global_this = global.toJSValue();
-        global_this.put(global, this.name, js_fn);
-
-        this.success = true;
-    }
-};
-
-// Force export all symbols by referencing them
+pub export fn bun_unprotect(_: ?*BunContext, value: BunValue) callconv(.c) void {
+    toJSValue(value).unprotect();
+}
 comptime {
     _ = &bun_initialize;
     _ = &bun_destroy;
+    _ = &bun_context;
     _ = &bun_eval_string;
     _ = &bun_eval_file;
     _ = &bun_run_pending_jobs;
     _ = &bun_get_event_fd;
     _ = &bun_wakeup;
-    _ = &bun_register_native_function;
-    _ = &bun_register_native_function_raw;
+    _ = &bun_bool;
+    _ = &bun_number;
+    _ = &bun_int32;
+    _ = &bun_string;
+    _ = &bun_object;
+    _ = &bun_array;
+    _ = &bun_global;
+    _ = &bun_function;
+    _ = &bun_is_undefined;
+    _ = &bun_is_null;
+    _ = &bun_is_bool;
+    _ = &bun_is_number;
+    _ = &bun_is_string;
+    _ = &bun_is_object;
+    _ = &bun_is_callable;
+    _ = &bun_to_bool;
+    _ = &bun_to_number;
+    _ = &bun_to_int32;
+    _ = &bun_to_utf8;
+    _ = &bun_set;
+    _ = &bun_get;
+    _ = &bun_set_index;
+    _ = &bun_get_index;
+    _ = &bun_define_accessor;
+    _ = &bun_set_internal_ptr;
+    _ = &bun_get_internal_ptr;
+    _ = &bun_call;
+    _ = &bun_call_async;
+    _ = &bun_protect;
+    _ = &bun_unprotect;
 }

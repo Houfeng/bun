@@ -1,12 +1,17 @@
-/// bun_embed.h — Minimal C API for embedding Bun's JS runtime into a host application.
+/// bun_embed.h — High-performance C API for embedding Bun's JS runtime.
 ///
-/// Usage:
-///   1. Call bun_initialize() once at startup.
-///   2. Call bun_eval_string() / bun_eval_file() to execute JavaScript/TypeScript code.
-///   3. Call bun_run_pending_jobs() periodically (e.g. in your GUI main loop) to
-///      drive the event loop (timers, promises, I/O, etc.).
-///   4. Use bun_register_native_function() to expose C functions to the JS environment.
-///   5. Call bun_destroy() when done.
+/// Design goals:
+///   - Zero-copy value passing between C and JavaScript (BunValue = uint64_t)
+///   - No JSON bridge overhead
+///   - Direct registration of functions/objects/getters/setters
+///
+/// Typical flow:
+///   1. bun_initialize()
+///   2. bun_context() to get JS context
+///   3. Register values/functions on global object
+///   4. bun_eval_string()/bun_eval_file()
+///   5. bun_run_pending_jobs() in host loop
+///   6. bun_destroy()
 
 #ifndef BUN_EMBED_H
 #define BUN_EMBED_H
@@ -21,21 +26,33 @@ extern "C" {
 /// Opaque handle to a Bun runtime instance.
 typedef struct BunRuntime BunRuntime;
 
+/// Opaque execution context (backed by JSGlobalObject* internally).
+typedef struct BunContext BunContext;
+
+/// Encoded JavaScript value (NaN-boxed JSValue).
+typedef uint64_t BunValue;
+
 /// Result from evaluating JavaScript code.
 typedef struct {
     int success;         // 1 if evaluation succeeded, 0 if failed
     const char *error;   // Error description if success == 0. Owned by runtime, valid until next bun_eval_string* call.
 } BunEvalResult;
 
-/// Type for a C function callable from JavaScript.
-/// @param argc  Number of arguments passed from JS.
-/// @param argv  Array of arguments as UTF-8 JSON-stringified values. Each is a
-///              null-terminated string valid only for the duration of this call.
-/// @param userdata  The userdata pointer passed to bun_register_native_function().
-/// @return  A UTF-8 JSON string representing the return value (e.g. "42",
-///          "\"hello\"", "null"). The runtime takes ownership; allocate with
-///          malloc(). Return NULL to return undefined to JS.
-typedef char* (*BunNativeFunction)(int argc, const char **argv, void *userdata);
+/// Host function callback callable from JavaScript.
+/// argv points to contiguous BunValue arguments valid only for this call.
+typedef BunValue (*BunHostFn)(BunContext *ctx, int argc, const BunValue *argv, void *userdata);
+
+/// Custom getter callback for bun_define_accessor().
+typedef BunValue (*BunGetterFn)(BunContext *ctx, BunValue this_value);
+
+/// Custom setter callback for bun_define_accessor().
+typedef void (*BunSetterFn)(BunContext *ctx, BunValue this_value, BunValue value);
+
+/// Predefined immediate values in JSValue64 mode.
+#define BUN_UNDEFINED ((BunValue)0xAULL)
+#define BUN_NULL ((BunValue)0x2ULL)
+#define BUN_TRUE ((BunValue)0x7ULL)
+#define BUN_FALSE ((BunValue)0x6ULL)
 
 // --------------------------------------------------------------------------
 // Lifecycle
@@ -49,6 +66,9 @@ BunRuntime *bun_initialize(const char *cwd);
 
 /// Destroy a Bun runtime and free all resources.
 void bun_destroy(BunRuntime *rt);
+
+/// Get the current JS context for this runtime.
+BunContext *bun_context(BunRuntime *rt);
 
 // --------------------------------------------------------------------------
 // Evaluation
@@ -92,33 +112,71 @@ int bun_get_event_fd(BunRuntime *rt);
 void bun_wakeup(BunRuntime *rt);
 
 // --------------------------------------------------------------------------
-// Native Function Injection
+// Value Creation
 // --------------------------------------------------------------------------
 
-/// Register a C function that becomes callable from JavaScript as a global function.
-///
-/// JS code can then call it as: `globalThis.<name>(...args)`
-///
-/// Arguments are passed as JSON strings. The return value should be a
-/// malloc'd JSON string (or NULL for undefined).
-///
-/// @param rt        Runtime handle.
-/// @param name      Function name (UTF-8, null-terminated).
-/// @param fn        Native function pointer.
-/// @param userdata  Arbitrary pointer passed to fn on every call.
-/// @return          1 on success, 0 on failure.
-int bun_register_native_function(BunRuntime *rt, const char *name, BunNativeFunction fn, void *userdata);
+BunValue bun_bool(int value);
+BunValue bun_number(double value);
+BunValue bun_int32(int32_t value);
+BunValue bun_string(BunContext *ctx, const char *utf8, size_t len);
+BunValue bun_object(BunContext *ctx);
+BunValue bun_array(BunContext *ctx, size_t len);
+BunValue bun_global(BunContext *ctx);
+BunValue bun_function(BunContext *ctx, const char *name, BunHostFn fn, void *userdata, int arg_count);
 
-/// Register a C function with direct JSC interop (advanced).
-/// The function receives raw JSC values. Use only if you link against JSC.
-/// Signature: JSValue (*)(JSGlobalObject*, CallFrame*) with C calling convention.
-///
-/// @param rt        Runtime handle.
-/// @param name      Function name (UTF-8, null-terminated).
-/// @param fn_ptr    JSC-compatible host function pointer (cast to void*).
-/// @param arg_count Number of expected arguments (.length property in JS).
-/// @return          1 on success, 0 on failure.
-int bun_register_native_function_raw(BunRuntime *rt, const char *name, void *fn_ptr, int arg_count);
+// --------------------------------------------------------------------------
+// Value Introspection & Conversion
+// --------------------------------------------------------------------------
+
+int bun_is_undefined(BunValue value);
+int bun_is_null(BunValue value);
+int bun_is_bool(BunValue value);
+int bun_is_number(BunValue value);
+int bun_is_string(BunValue value);
+int bun_is_object(BunValue value);
+int bun_is_callable(BunValue value);
+
+int bun_to_bool(BunValue value);
+double bun_to_number(BunContext *ctx, BunValue value);
+int32_t bun_to_int32(BunValue value);
+
+/// Returns a newly allocated UTF-8 string. Caller must free() the returned pointer.
+/// On failure, returns NULL.
+char *bun_to_utf8(BunContext *ctx, BunValue value, size_t *out_len);
+
+// --------------------------------------------------------------------------
+// Object & Property Operations
+// --------------------------------------------------------------------------
+
+int bun_set(BunContext *ctx, BunValue object, const char *key, size_t key_len, BunValue value);
+BunValue bun_get(BunContext *ctx, BunValue object, const char *key, size_t key_len);
+
+int bun_set_index(BunContext *ctx, BunValue object, uint32_t index, BunValue value);
+BunValue bun_get_index(BunContext *ctx, BunValue object, uint32_t index);
+
+int bun_define_accessor(
+    BunContext *ctx,
+    BunValue object,
+    const char *key,
+    size_t key_len,
+    BunGetterFn getter,
+    BunSetterFn setter,
+    int read_only,
+    int dont_enum,
+    int dont_delete);
+
+void bun_set_internal_ptr(BunContext *ctx, BunValue object, void *ptr);
+void *bun_get_internal_ptr(BunContext *ctx, BunValue object);
+
+// --------------------------------------------------------------------------
+// Function Call & GC Lifetime
+// --------------------------------------------------------------------------
+
+BunValue bun_call(BunContext *ctx, BunValue fn, BunValue this_value, int argc, const BunValue *argv);
+int bun_call_async(BunRuntime *rt, BunValue fn, BunValue this_value, int argc, const BunValue *argv);
+
+void bun_protect(BunContext *ctx, BunValue value);
+void bun_unprotect(BunContext *ctx, BunValue value);
 
 #ifdef __cplusplus
 }
