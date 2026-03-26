@@ -360,8 +360,17 @@ export function emitBun(n: Ninja, cfg: Config, sources: Sources): BunOutput {
       implicitInputs: linkImplicitInputs(cfg),
     });
 
-    n.phony("bun", [sharedLibOut]);
-    n.default(["bun"]);
+    // Strip for release builds (same logic as executable).
+    const defaultTargets: string[] = [];
+    if (shouldStrip(cfg)) {
+      const suffix = cfg.darwin ? ".dylib" : cfg.windows ? ".dll" : ".so";
+      const strippedOut = emitStripSharedLib(n, cfg, sharedLibOut, flags.stripflags, suffix);
+      defaultTargets.push(strippedOut);
+    } else {
+      n.phony("bun", [sharedLibOut]);
+      defaultTargets.push("bun");
+    }
+    n.default(defaultTargets);
 
     return { sharedLib: sharedLibOut, deps, codegen, zigObjects, objects: allObjects };
   }
@@ -619,8 +628,49 @@ function emitStrip(n: Ninja, cfg: Config, inputExe: string, stripflags: string[]
 }
 
 /**
- * Extract debug symbols from the linked (unstripped) executable into a
- * .dSYM bundle. darwin-only.
+ * Strip a shared library → libbun-stripped.dylib/so. Returns absolute path
+ * to the stripped output.
+ *
+ * Uses -x (strip local symbols only) instead of --strip-all, because
+ * --strip-all removes the dynamic symbol table which shared libraries need.
+ */
+function emitStripSharedLib(n: Ninja, cfg: Config, inputLib: string, _stripflags: string[], suffix: string): string {
+  const out = resolve(cfg.buildDir, `libbun-stripped${suffix}`);
+
+  // Shared-lib-specific strip flags: -x preserves exported dynamic symbols.
+  // Also remove unwind sections on macOS (same as exe strip).
+  const sharedStripFlags: string[] = ["-x"];
+  if (cfg.darwin) {
+    sharedStripFlags.push(
+      "--remove-section=__TEXT,__eh_frame",
+      "--remove-section=__TEXT,__unwind_info",
+      "--remove-section=__TEXT,__gcc_except_tab",
+    );
+  }
+
+  if (cfg.windows) {
+    n.rule("strip_shared", {
+      command: `cmd /c "copy /Y $in $out"`,
+      description: "copy $out (windows: no strip)",
+    });
+  } else {
+    n.rule("strip_shared", {
+      command: `${quote(cfg.strip, false)} $stripflags $in -o $out`,
+      description: "strip $out",
+    });
+  }
+
+  n.build({
+    outputs: [out],
+    rule: "strip_shared",
+    inputs: [inputLib],
+    vars: cfg.windows ? {} : { stripflags: sharedStripFlags.join(" ") },
+  });
+
+  return out;
+}
+
+/**
  *
  * Runs dsymutil on bun-profile (which has full DWARF). The .dSYM lets you
  * symbolicate crash logs from the stripped `bun` — lldb/Instruments find
