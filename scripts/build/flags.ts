@@ -637,8 +637,18 @@ export const linkerFlags: Flag[] = [
   // ─── macOS ───
   {
     flag: ["-Wl,-ld_new", "-Wl,-no_compact_unwind", "-Wl,-stack_size,0x1200000", "-fno-keep-static-consts"],
-    when: c => c.darwin,
+    when: c => c.darwin && !c.sharedLib,
     desc: "Use new Apple linker, 18MB stack, skip compact unwind",
+  },
+  {
+    flag: ["-Wl,-ld_new", "-Wl,-no_compact_unwind", "-fno-keep-static-consts"],
+    when: c => c.darwin && c.sharedLib,
+    desc: "Use new Apple linker, skip compact unwind (shared lib — no stack_size)",
+  },
+  {
+    flag: "-Wl,-install_name,@rpath/libbun.dylib",
+    when: c => c.darwin && c.sharedLib,
+    desc: "Set install_name for shared library",
   },
   {
     // Must also be passed at link: ld64 reads this to write LC_BUILD_VERSION.minos.
@@ -707,7 +717,7 @@ export const linkerFlags: Flag[] = [
   },
   {
     flag: ["-fno-pic", "-Wl,-no-pie"],
-    when: c => c.linux,
+    when: c => c.linux && !c.sharedLib,
     desc: "No PIE (we don't need ASLR; simpler codegen)",
   },
   {
@@ -724,8 +734,24 @@ export const linkerFlags: Flag[] = [
       "-Wl,--hash-style=both",
       "-Wl,--build-id=sha1",
     ],
-    when: c => c.linux,
+    when: c => c.linux && !c.sharedLib,
     desc: "Linux linker tuning: lazy binding, large stack, compressed debug, fast gdb loading",
+  },
+  {
+    flag: [
+      "-Wl,--as-needed",
+      "-Wl,--compress-debug-sections=zlib",
+      "-Wl,-z,lazy",
+      "-Wl,-O2",
+      "-Wl,--gdb-index",
+      "-Wl,-z,combreloc",
+      "-Wl,--sort-section=name",
+      "-Wl,--hash-style=both",
+      "-Wl,--build-id=sha1",
+      "-Wl,-soname,libbun.so",
+    ],
+    when: c => c.linux && c.sharedLib,
+    desc: "Linux shared lib linker tuning: lazy binding, soname, compressed debug",
   },
   {
     flag: "-Wl,--gc-sections",

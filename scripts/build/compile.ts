@@ -129,6 +129,20 @@ export function registerCompileRules(n: Ninja, cfg: Config): void {
     rspfile: "$out.rsp",
     rspfile_content: "$in_newline",
   });
+
+  // ─── Link shared library ───
+  // Same as link, but with -shared (Unix) or /DLL (Windows).
+  if (cfg.sharedLib) {
+    n.rule("link_shared", {
+      command: cfg.windows
+        ? `${wrap} ${cxx} /nologo -fuse-ld=lld @$out.rsp /Fe$out /link /DLL $ldflags`
+        : `${wrap} ${cxx} -shared @$out.rsp $ldflags -o $out`,
+      description: "link_shared $out",
+      rspfile: "$out.rsp",
+      rspfile_content: "$in_newline",
+      pool: "console",
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +405,29 @@ export function ar(n: Ninja, cfg: Config, out: string, objects: string[]): strin
     rule: "ar",
     inputs: objects,
   });
+
+  return absOut;
+}
+
+/**
+ * Link a shared library (.dylib/.so/.dll). Returns absolute path to output.
+ */
+export function linkShared(n: Ninja, cfg: Config, out: string, objects: string[], opts: LinkOpts): string {
+  const suffix = cfg.darwin ? ".dylib" : cfg.windows ? ".dll" : ".so";
+  const absOut = resolve(cfg.buildDir, out + suffix);
+
+  const node: BuildNode = {
+    outputs: [absOut],
+    rule: "link_shared",
+    inputs: [...objects, ...opts.libs],
+    vars: {
+      ldflags: opts.flags.join(" "),
+    },
+  };
+  if (opts.implicitInputs !== undefined && opts.implicitInputs.length > 0) {
+    node.implicitInputs = opts.implicitInputs;
+  }
+  n.build(node);
 
   return absOut;
 }

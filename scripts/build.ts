@@ -76,6 +76,11 @@ async function main(): Promise<void> {
       ? loadConfigFile(args.configFile)
       : { ...getProfile(args.profile), ...args.overrides };
 
+  // Environment variable override: BUN_BUILD_SHARED=1 → build shared library.
+  if (process.env.BUN_BUILD_SHARED === "1" && partial.sharedLib === undefined) {
+    partial.sharedLib = true;
+  }
+
   const ninjaArgv = (cfg: { buildDir: string }) => ["-C", cfg.buildDir, ...args.ninjaArgs, ...args.ninjaTargets];
   const ninjaEnv = (env: Record<string, string>) => ({ ...process.env, ...env });
 
@@ -225,6 +230,7 @@ function parseArgs(argv: string[]): CliArgs {
     "tinycc",
     "valgrind",
     "fuzzilli",
+    "sharedLib",
     "ci",
     "buildkite",
   ]);
@@ -320,15 +326,21 @@ Options:
                           on/off/true/false/yes/no/1/0.
                           Fields: asan, lto, assertions, logs, baseline,
                                   canary, valgrind, webkit (prebuilt|local),
-                                  buildDir, mode (full|cpp-only|link-only)
+                                  buildDir, mode (full|cpp-only|link-only),
+                                  sharedLib
   --configure-only        Emit build.ninja, don't run it
   -j<N>, -v, -k<N>        Passed through to ninja
   --                      Everything after is a ninja target
   --help                  Show this help
 
+Environment variables:
+  BUN_BUILD_SHARED=1      Build shared library (libbun.dylib/libbun.so)
+
 Examples:
   bun scripts/build.ts --profile=debug
   bun scripts/build.ts --profile=release --lto=off
+  bun scripts/build.ts --profile=debug --shared-lib=on
+  BUN_BUILD_SHARED=1 bun scripts/build.ts --profile=debug
   bun scripts/build.ts --profile=debug -- bun-zig
   bun scripts/build.ts --configure-only
 `;

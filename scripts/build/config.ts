@@ -112,6 +112,8 @@ export interface Config {
   tinycc: boolean;
   valgrind: boolean;
   fuzzilli: boolean;
+  /** Build a shared library (libbun.dylib/libbun.so) instead of an executable. */
+  sharedLib: boolean;
 
   // ─── Environment ───
   ci: boolean;
@@ -207,6 +209,7 @@ export interface PartialConfig {
   tinycc?: boolean;
   valgrind?: boolean;
   fuzzilli?: boolean;
+  sharedLib?: boolean;
   ci?: boolean;
   buildkite?: boolean;
   webkit?: WebKitMode;
@@ -393,6 +396,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
 
   const valgrind = partial.valgrind ?? false;
   const fuzzilli = partial.fuzzilli ?? false;
+  const sharedLib = partial.sharedLib ?? false;
 
   // ─── Paths ───
   const cwd = findRepoRoot();
@@ -474,6 +478,7 @@ export function resolveConfig(partial: PartialConfig, toolchain: Toolchain): Con
     tinycc,
     valgrind,
     fuzzilli,
+    sharedLib,
     ci,
     buildkite,
     webkit: partial.webkit ?? "prebuilt",

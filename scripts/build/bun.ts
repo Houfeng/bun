@@ -24,7 +24,7 @@
 import { readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { emitCodegen, zigFilesGeneratedIntoSrc, type CodegenOutputs } from "./codegen.ts";
-import { ar, cc, cxx, link, pch } from "./compile.ts";
+import { ar, cc, cxx, link, linkShared, pch } from "./compile.ts";
 import { bunExeName, shouldStrip, type Config } from "./config.ts";
 import { generateDepVersionsHeader } from "./depVersionsHeader.ts";
 import { allDeps } from "./deps/index.ts";
@@ -121,6 +121,8 @@ export interface BunOutput {
   dsym?: string | undefined;
   /** libbun.a — all C/C++ objects archived. cpp-only. */
   archive?: string;
+  /** Shared library (libbun.dylib/libbun.so/libbun.dll). sharedLib mode. */
+  sharedLib?: string;
   /** All resolved deps (full libs list). Empty in link-only (paths computed separately). */
   deps: ResolvedDep[];
   /** All codegen outputs. Not present in link-only. */
@@ -348,6 +350,21 @@ export function emitBun(n: Ninja, cfg: Config, sources: Sources): BunOutput {
   // on cfg.version which the link step already has. Matches cmake's
   // behavior of adding WINDOWS_RESOURCES to add_executable in link-only.
   const windowsRes = cfg.windows ? [emitWindowsResources(n, cfg)] : [];
+
+  if (cfg.sharedLib) {
+    // ─── Shared library build ───
+    const libName = "libbun";
+    const sharedLibOut = linkShared(n, cfg, libName, [...allObjects, ...zigObjects, ...windowsRes], {
+      libs: depLibs,
+      flags: [...flags.ldflags, ...systemLibs(cfg), ...manifestLinkFlags(cfg)],
+      implicitInputs: linkImplicitInputs(cfg),
+    });
+
+    n.phony("bun", [sharedLibOut]);
+    n.default(["bun"]);
+
+    return { sharedLib: sharedLibOut, deps, codegen, zigObjects, objects: allObjects };
+  }
 
   // Full link.
   const exe = link(n, cfg, exeName, [...allObjects, ...zigObjects, ...windowsRes], {

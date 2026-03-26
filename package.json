@@ -44,6 +44,8 @@
     "build:smol": "bun scripts/build.ts --profile=release --build-type=MinSizeRel --build-dir=build/release-smol",
     "build:local": "bun scripts/build.ts --profile=debug-local --build-dir=build/debug-local",
     "build:release:local": "bun scripts/build.ts --profile=release-local --build-dir=build/release-local",
+    "build:shared": "BUN_BUILD_SHARED=1 bun scripts/build.ts --profile=debug --shared-lib=on --build-dir=build/shared",
+    "build:shared:release": "BUN_BUILD_SHARED=1 bun scripts/build.ts --profile=release --shared-lib=on --build-dir=build/shared-release",
     "build:cmake:debug": "export COMSPEC=\"C:\\Windows\\System32\\cmd.exe\" && bun ./scripts/build.mjs -GNinja -DCMAKE_BUILD_TYPE=Debug -B build/cmake-debug --log-level=NOTICE",
     "build:cmake:release": "bun ./scripts/build.mjs -GNinja -DCMAKE_BUILD_TYPE=Release -B build/cmake-release",
     "build:cmake:local": "bun ./scripts/build.mjs -GNinja -DCMAKE_BUILD_TYPE=Debug -DWEBKIT_LOCAL=ON -B build/cmake-debug-local",
