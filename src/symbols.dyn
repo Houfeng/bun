@@ -587,6 +587,7 @@
     _bun_define_getter;
     _bun_define_setter;
     _bun_define_accessor;
+    _bun_define_finalizer;
     _bun_set_internal_ptr;
     _bun_get_internal_ptr;
     _bun_call;

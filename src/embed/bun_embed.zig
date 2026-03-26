@@ -18,6 +18,7 @@ const BunContext = opaque {};
 const BunHostFn = *const fn (?*BunContext, c_int, ?[*]const BunValue, ?*anyopaque) callconv(.c) BunValue;
 const BunGetterFn = *const fn (?*BunContext, BunValue) callconv(.c) BunValue;
 const BunSetterFn = *const fn (?*BunContext, BunValue, BunValue) callconv(.c) void;
+const BunFinalizerFn = *const fn (?*anyopaque) callconv(.c) void;
 
 const HostFnData = struct {
     native_fn: BunHostFn,
@@ -119,6 +120,13 @@ extern fn BunEmbed__defineCustomAccessor(
     getter: ?BunGetterFn,
     setter: ?BunSetterFn,
     flags: u32,
+) bool;
+
+extern fn BunEmbed__defineFinalizer(
+    global: *JSGlobalObject,
+    object: JSValue,
+    finalizer: BunFinalizerFn,
+    userdata: ?*anyopaque,
 ) bool;
 
 const BUN_ACCESSOR_READ_ONLY: u32 = 1 << 0;
@@ -669,6 +677,27 @@ pub export fn bun_define_accessor(
 }
 
 const internal_ptr_key = "__bun_internal_ptr__";
+const finalizer_attached_key = "__bun_finalizer_attached__";
+
+pub export fn bun_define_finalizer(
+    ctx: ?*BunContext,
+    object: BunValue,
+    finalizer: ?BunFinalizerFn,
+    userdata: ?*anyopaque,
+) callconv(.c) c_int {
+    const global = toGlobal(ctx) orelse return 0;
+    const callback = finalizer orelse return 0;
+    const obj = toJSValue(object);
+    if (!obj.isObject()) return 0;
+
+    const existing = obj.getPropertyValue(global, finalizer_attached_key) catch null;
+    if (existing != null) return 0;
+
+    if (!BunEmbed__defineFinalizer(global, obj, callback, userdata)) return 0;
+
+    obj.put(global, finalizer_attached_key, JSValue.jsBoolean(true));
+    return 1;
+}
 
 pub export fn bun_set_internal_ptr(ctx: ?*BunContext, object: BunValue, ptr: ?*anyopaque) callconv(.c) void {
     const global = toGlobal(ctx) orelse return;
@@ -798,6 +827,7 @@ comptime {
     _ = &bun_define_getter;
     _ = &bun_define_setter;
     _ = &bun_define_accessor;
+    _ = &bun_define_finalizer;
     _ = &bun_set_internal_ptr;
     _ = &bun_get_internal_ptr;
     _ = &bun_call;

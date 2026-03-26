@@ -15,6 +15,7 @@ using namespace JSC;
 
 using BunEmbedGetterFn = uint64_t (*)(void* ctx, uint64_t this_value);
 using BunEmbedSetterFn = void (*)(void* ctx, uint64_t this_value, uint64_t value);
+using BunEmbedFinalizerFn = void (*)(void* userdata);
 
 struct AccessorKey {
     uintptr_t object_ptr;
@@ -133,6 +134,27 @@ extern "C" bool BunEmbed__defineCustomAccessor(
 
     auto* custom = CustomGetterSetter::create(vm, BunEmbed_customGetter, setter ? BunEmbed_customSetter : nullptr);
     object->putDirectCustomAccessor(vm, Identifier::fromString(vm, keyString), custom, attributes);
+    return true;
+}
+
+extern "C" bool BunEmbed__defineFinalizer(
+    JSGlobalObject* globalObject,
+    EncodedJSValue objectValue,
+    BunEmbedFinalizerFn finalizer,
+    void* userdata)
+{
+    if (!globalObject || !finalizer)
+        return false;
+
+    JSValue value = JSValue::decode(objectValue);
+    JSObject* object = value.getObject();
+    if (!object)
+        return false;
+
+    VM& vm = globalObject->vm();
+    vm.heap.addFinalizer(object, [finalizer, userdata](JSCell*) -> void {
+        finalizer(userdata);
+    });
     return true;
 }
 

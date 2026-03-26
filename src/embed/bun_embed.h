@@ -48,6 +48,12 @@ typedef BunValue (*BunGetterFn)(BunContext *ctx, BunValue this_value);
 /// Custom setter callback for bun_define_accessor().
 typedef void (*BunSetterFn)(BunContext *ctx, BunValue this_value, BunValue value);
 
+/// Finalizer callback for bun_define_finalizer().
+///
+/// This runs during GC finalization. It must not call back into Bun/JS APIs.
+/// Use it only to release native resources associated with the object.
+typedef void (*BunFinalizerFn)(void *userdata);
+
 /// Predefined immediate values in JSValue64 mode.
 #define BUN_UNDEFINED ((BunValue)0xAULL)
 #define BUN_NULL ((BunValue)0x2ULL)
@@ -182,6 +188,12 @@ int bun_define_accessor(
     int read_only,
     int dont_enum,
     int dont_delete);
+
+int bun_define_finalizer(
+    BunContext *ctx,
+    BunValue object,
+    BunFinalizerFn finalizer,
+    void *userdata);
 
 void bun_set_internal_ptr(BunContext *ctx, BunValue object, void *ptr);
 void *bun_get_internal_ptr(BunContext *ctx, BunValue object);

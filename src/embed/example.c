@@ -15,6 +15,11 @@ typedef struct {
     int value;
 } Counter;
 
+static void counter_finalize(void *userdata) {
+    Counter *counter = (Counter *)userdata;
+    free(counter);
+}
+
 static BunValue native_add(BunContext *ctx, int argc, const BunValue *argv, void *userdata) {
     (void)ctx;
     (void)userdata;
@@ -88,10 +93,18 @@ int main(void) {
     bun_set(ctx, global, "nativeAdd", 9, add_fn);
     bun_set(ctx, global, "nativeGreet", 11, greet_fn);
 
-    Counter counter = { .value = 10 };
+    Counter *counter = malloc(sizeof(*counter));
+    if (!counter) {
+        fprintf(stderr, "Failed to allocate counter\n");
+        bun_destroy(rt);
+        return 1;
+    }
+    counter->value = 10;
+
     BunValue counter_obj = bun_object(ctx);
     BunValue inc_fn = bun_function(ctx, "inc", counter_inc, NULL, 0);
-    bun_set_internal_ptr(ctx, counter_obj, &counter);
+    bun_set_internal_ptr(ctx, counter_obj, counter);
+    bun_define_finalizer(ctx, counter_obj, counter_finalize, counter);
     bun_set(ctx, counter_obj, "inc", 3, inc_fn);
     bun_define_accessor(ctx, counter_obj, "value", 5, counter_get, counter_set, 0, 0, 0);
     bun_set(ctx, global, "counter", 7, counter_obj);
