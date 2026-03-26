@@ -150,7 +150,7 @@ pub export fn bun_destroy(rt: ?*BunRuntime) callconv(.c) void {
 // Evaluation
 // ---------------------------------------------------------------------------
 
-pub export fn bun_eval(rt: ?*BunRuntime, code_ptr: ?[*:0]const u8) callconv(.c) BunEvalResult {
+pub export fn bun_eval_string(rt: ?*BunRuntime, code_ptr: ?[*:0]const u8) callconv(.c) BunEvalResult {
     const runtime = rt orelse return .{ .success = 0, .@"error" = "null runtime" };
     runtime.freeLastError();
 
@@ -241,7 +241,7 @@ const EvalFileContext = struct {
 // Event Loop Integration
 // ---------------------------------------------------------------------------
 
-pub export fn bun_eval_pending_jobs(rt: ?*BunRuntime) callconv(.c) c_int {
+pub export fn bun_run_pending_jobs(rt: ?*BunRuntime) callconv(.c) c_int {
     const runtime = rt orelse return 0;
     var tick_ctx = TickContext{ .runtime = runtime, .has_pending = false };
     runtime.vm.runWithAPILock(TickContext, &tick_ctx, TickContext.run);
@@ -293,7 +293,7 @@ pub export fn bun_wakeup(rt: ?*BunRuntime) callconv(.c) void {
 /// C callback type: char* (*)(int argc, const char** argv, void* userdata)
 const BunNativeFunction = *const fn (c_int, ?[*]const ?[*:0]const u8, ?*anyopaque) callconv(.c) ?[*:0]u8;
 
-pub export fn bun_inject_native_function(
+pub export fn bun_register_native_function(
     rt: ?*BunRuntime,
     name_ptr: ?[*:0]const u8,
     native_fn: ?BunNativeFunction,
@@ -432,7 +432,7 @@ fn nativeCallbackTrampoline(global: *JSGlobalObject, callframe: *jsc.CallFrame) 
     return .js_undefined;
 }
 
-pub export fn bun_inject_native_function_raw(
+pub export fn bun_register_native_function_raw(
     rt: ?*BunRuntime,
     name_ptr: ?[*:0]const u8,
     fn_ptr: ?*anyopaque,
@@ -498,11 +498,11 @@ const InjectRawContext = struct {
 comptime {
     _ = &bun_initialize;
     _ = &bun_destroy;
-    _ = &bun_eval;
+    _ = &bun_eval_string;
     _ = &bun_eval_file;
-    _ = &bun_eval_pending_jobs;
+    _ = &bun_run_pending_jobs;
     _ = &bun_get_event_fd;
     _ = &bun_wakeup;
-    _ = &bun_inject_native_function;
-    _ = &bun_inject_native_function_raw;
+    _ = &bun_register_native_function;
+    _ = &bun_register_native_function_raw;
 }

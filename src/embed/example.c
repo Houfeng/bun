@@ -3,7 +3,7 @@
 /// This example shows how to:
 ///   1. Initialize a Bun runtime
 ///   2. Evaluate JavaScript code
-///   3. Inject native C functions callable from JS
+///   3. Register native C functions callable from JS
 ///   4. Drive the event loop manually (simulating a GUI main loop)
 ///   5. Clean up
 ///
@@ -78,28 +78,28 @@ int main(void) {
     }
 
     // Inject native functions
-    if (!bun_inject_native_function(rt, "nativeAdd", native_add, NULL)) {
-        fprintf(stderr, "Failed to inject nativeAdd\n");
+    if (!bun_register_native_function(rt, "nativeAdd", native_add, NULL)) {
+        fprintf(stderr, "Failed to register nativeAdd\n");
     }
-    if (!bun_inject_native_function(rt, "nativeGreet", native_greet, NULL)) {
-        fprintf(stderr, "Failed to inject nativeGreet\n");
+    if (!bun_register_native_function(rt, "nativeGreet", native_greet, NULL)) {
+        fprintf(stderr, "Failed to register nativeGreet\n");
     }
 
     // Evaluate some JavaScript
     printf("\n--- Evaluating JS ---\n");
     BunEvalResult r;
 
-    r = bun_eval(rt, "console.log('Hello from embedded Bun!')");
+    r = bun_eval_string(rt, "console.log('Hello from embedded Bun!')");
     if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
 
-    r = bun_eval(rt, "console.log('nativeAdd(3, 4) =', nativeAdd(3, 4))");
+    r = bun_eval_string(rt, "console.log('nativeAdd(3, 4) =', nativeAdd(3, 4))");
     if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
 
-    r = bun_eval(rt, "console.log(nativeGreet('Bun'))");
+    r = bun_eval_string(rt, "console.log(nativeGreet('Bun'))");
     if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
 
     // Schedule a timer to demonstrate event loop integration
-    r = bun_eval(rt,
+    r = bun_eval_string(rt,
         "let count = 0;"
         "const timer = setInterval(() => {"
         "  count++;"
@@ -112,7 +112,7 @@ int main(void) {
     // Simulate a GUI main loop: poll the event loop until idle
     printf("\n--- Running event loop ---\n");
     for (int i = 0; i < 100; i++) {
-        int has_pending = bun_eval_pending_jobs(rt);
+        int has_pending = bun_run_pending_jobs(rt);
         if (!has_pending) {
             printf("Event loop idle, stopping.\n");
             break;

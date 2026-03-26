@@ -555,11 +555,11 @@
     _uv_wtf8_to_utf16;
     _bun_initialize;
     _bun_destroy;
-    _bun_eval;
+    _bun_eval_string;
     _bun_eval_file;
-    _bun_eval_pending_jobs;
+    _bun_run_pending_jobs;
     _bun_get_event_fd;
     _bun_wakeup;
-    _bun_inject_native_function;
-    _bun_inject_native_function_raw;
+    _bun_register_native_function;
+    _bun_register_native_function_raw;
 };
