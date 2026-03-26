@@ -602,6 +602,50 @@ pub export fn bun_get_index(ctx: ?*BunContext, object: BunValue, index: u32) cal
     return toBunValue(value);
 }
 
+pub export fn bun_define_getter(
+    ctx: ?*BunContext,
+    object: BunValue,
+    key_ptr: ?[*]const u8,
+    key_len: usize,
+    getter: ?BunGetterFn,
+    dont_enum: c_int,
+    dont_delete: c_int,
+) callconv(.c) c_int {
+    return bun_define_accessor(
+        ctx,
+        object,
+        key_ptr,
+        key_len,
+        getter,
+        null,
+        1,
+        dont_enum,
+        dont_delete,
+    );
+}
+
+pub export fn bun_define_setter(
+    ctx: ?*BunContext,
+    object: BunValue,
+    key_ptr: ?[*]const u8,
+    key_len: usize,
+    setter: ?BunSetterFn,
+    dont_enum: c_int,
+    dont_delete: c_int,
+) callconv(.c) c_int {
+    return bun_define_accessor(
+        ctx,
+        object,
+        key_ptr,
+        key_len,
+        null,
+        setter,
+        0,
+        dont_enum,
+        dont_delete,
+    );
+}
+
 pub export fn bun_define_accessor(
     ctx: ?*BunContext,
     object: BunValue,
@@ -751,6 +795,8 @@ comptime {
     _ = &bun_get;
     _ = &bun_set_index;
     _ = &bun_get_index;
+    _ = &bun_define_getter;
+    _ = &bun_define_setter;
     _ = &bun_define_accessor;
     _ = &bun_set_internal_ptr;
     _ = &bun_get_internal_ptr;

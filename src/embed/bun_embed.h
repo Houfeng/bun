@@ -154,6 +154,24 @@ BunValue bun_get(BunContext *ctx, BunValue object, const char *key, size_t key_l
 int bun_set_index(BunContext *ctx, BunValue object, uint32_t index, BunValue value);
 BunValue bun_get_index(BunContext *ctx, BunValue object, uint32_t index);
 
+int bun_define_getter(
+    BunContext *ctx,
+    BunValue object,
+    const char *key,
+    size_t key_len,
+    BunGetterFn getter,
+    int dont_enum,
+    int dont_delete);
+
+int bun_define_setter(
+    BunContext *ctx,
+    BunValue object,
+    const char *key,
+    size_t key_len,
+    BunSetterFn setter,
+    int dont_enum,
+    int dont_delete);
+
 int bun_define_accessor(
     BunContext *ctx,
     BunValue object,
