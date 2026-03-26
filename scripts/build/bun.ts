@@ -353,7 +353,7 @@ export function emitBun(n: Ninja, cfg: Config, sources: Sources): BunOutput {
 
   if (cfg.sharedLib) {
     // ─── Shared library build ───
-    const libName = "libbun";
+    const libName = shouldStrip(cfg) ? "libbun-profile" : "libbun";
     const sharedLibOut = linkShared(n, cfg, libName, [...allObjects, ...zigObjects, ...windowsRes], {
       libs: depLibs,
       flags: [...flags.ldflags, ...systemLibs(cfg), ...manifestLinkFlags(cfg)],
@@ -628,14 +628,14 @@ function emitStrip(n: Ninja, cfg: Config, inputExe: string, stripflags: string[]
 }
 
 /**
- * Strip a shared library → libbun-stripped.dylib/so. Returns absolute path
+ * Strip a shared library → libbun.dylib/so. Returns absolute path
  * to the stripped output.
  *
  * Uses -x (strip local symbols only) instead of --strip-all, because
  * --strip-all removes the dynamic symbol table which shared libraries need.
  */
 function emitStripSharedLib(n: Ninja, cfg: Config, inputLib: string, _stripflags: string[], suffix: string): string {
-  const out = resolve(cfg.buildDir, `libbun-stripped${suffix}`);
+  const out = resolve(cfg.buildDir, `libbun${suffix}`);
 
   // Shared-lib-specific strip flags: -x preserves exported dynamic symbols.
   // Also remove unwind sections on macOS (same as exe strip).
