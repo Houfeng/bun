@@ -15,6 +15,7 @@ pub var string_allocation_limit: usize = std.math.maxInt(u32);
 
 comptime {
     _ = Bun__remapStackFramePositions;
+    _ = @import("../embed/bun_embed.zig");
     @export(&scriptExecutionStatus, .{ .name = "Bun__VM__scriptExecutionStatus" });
     @export(&setEntryPointEvalResultESM, .{ .name = "Bun__VM__setEntryPointEvalResultESM" });
     @export(&setEntryPointEvalResultCJS, .{ .name = "Bun__VM__setEntryPointEvalResultCJS" });

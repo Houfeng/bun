@@ -553,4 +553,13 @@
     _uv_write2;
     _uv_wtf8_length_as_utf16;
     _uv_wtf8_to_utf16;
+    _bun_initialize;
+    _bun_destroy;
+    _bun_eval;
+    _bun_eval_file;
+    _bun_eval_pending_jobs;
+    _bun_get_event_fd;
+    _bun_wakeup;
+    _bun_inject_native_function;
+    _bun_inject_native_function_raw;
 };
