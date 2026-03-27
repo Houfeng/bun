@@ -227,9 +227,6 @@ int bun_call_async(BunRuntime* rt, BunValue fn, BunValue this_value, int argc, c
 void bun_protect(BunContext* ctx, BunValue value);
 void bun_unprotect(BunContext* ctx, BunValue value);
 
-void bun_protect(BunContext* ctx, BunValue value);
-void bun_unprotect(BunContext* ctx, BunValue value);
-
 #ifdef __cplusplus
 }
 #endif
