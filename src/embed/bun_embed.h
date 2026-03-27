@@ -34,8 +34,11 @@ typedef uint64_t BunValue;
 
 /// Result from evaluating JavaScript code.
 typedef struct {
-    int success; // 1 if evaluation succeeded, 0 if failed
-    const char* error; // Error description if success == 0. Owned by runtime, valid until next bun_eval_string* call.
+    int success; ///< 1 if evaluation succeeded, 0 if failed.
+    /// Error description when success == 0. Points into the runtime's internal
+    /// buffer; valid until the next bun_eval*() or bun_call() call on this
+    /// runtime. Do not free(). NULL when success == 1.
+    const char* error;
 } BunEvalResult;
 
 /// Host function callback callable from JavaScript.
