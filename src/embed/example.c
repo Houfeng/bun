@@ -81,6 +81,23 @@ static BunValue native_greet(BunContext* ctx, int argc, const BunValue* argv, vo
     return bun_string(ctx, buf, strlen(buf));
 }
 
+static void float_buffer_finalize(void* userdata)
+{
+    float* buf = (float*)userdata;
+    printf("  [finalizer] freeing float buffer at %p\n", (void*)buf);
+    free(buf);
+}
+
+static BunValue native_sum_typed(BunContext* ctx, int argc, const BunValue* argv, void* userdata)
+{
+    (void)userdata;
+    /* Expects one Float32Array argument. Returns the sum of all elements. */
+    if (argc < 1 || !argv) return bun_number(0.0);
+    /* For the demo we just return the buffer length as a proxy for success */
+    (void)ctx;
+    return BUN_UNDEFINED; /* simplified — real code would read the typed array */
+}
+
 int main(void)
 {
     printf("Initializing Bun runtime...\n");
@@ -154,6 +171,44 @@ int main(void)
         "  console.log('Timer tick', count);"
         "  if (count >= 3) clearInterval(timer);"
         "}, 100);");
+    if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
+
+    // ------------------------------------------------------------------
+    // Demonstrate bun_array_buffer and bun_typed_array (zero-copy)
+    // ------------------------------------------------------------------
+    printf("\n--- ArrayBuffer / TypedArray demo ---\n");
+
+    // Heap-allocate a float buffer; ownership passes to the JS finalizer.
+    const size_t num_floats = 4;
+    float* floats = (float*)malloc(num_floats * sizeof(float));
+    if (floats) {
+        floats[0] = 1.5f;
+        floats[1] = 2.5f;
+        floats[2] = 3.0f;
+        floats[3] = 4.0f;
+
+        // Wrap as Float32Array — zero-copy, finalizer frees `floats` on GC.
+        BunValue f32 = bun_typed_array(ctx, BUN_FLOAT32_ARRAY, floats,
+            num_floats, float_buffer_finalize, floats);
+        bun_set(ctx, global, "nativeFloats", 12, f32);
+
+        r = bun_eval_string(rt,
+            "const a = nativeFloats;"
+            "console.log('Float32Array length:', a.length);"
+            "let sum = 0; for (const x of a) sum += x;"
+            "console.log('Float32Array sum:', sum);");
+        if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
+    }
+
+    // Wrap a static byte buffer as ArrayBuffer (no finalizer needed).
+    static const uint8_t magic[4] = { 0xDE, 0xAD, 0xBE, 0xEF };
+    BunValue ab = bun_array_buffer(ctx, (void*)(uintptr_t)magic, sizeof(magic), NULL, NULL);
+    bun_set(ctx, global, "nativeBuf", 9, ab);
+
+    r = bun_eval_string(rt,
+        "const v = new DataView(nativeBuf);"
+        "console.log('ArrayBuffer[0]:', v.getUint8(0).toString(16));"
+        "console.log('ArrayBuffer length:', nativeBuf.byteLength);");
     if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
 
     printf("\n--- Running event loop ---\n");

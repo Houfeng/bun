@@ -184,6 +184,23 @@ extern fn BunEmbed__defineFinalizer(
     userdata: ?*anyopaque,
 ) bool;
 
+extern fn BunEmbed__createArrayBuffer(
+    global: *JSGlobalObject,
+    data: ?*anyopaque,
+    byte_len: usize,
+    finalizer: ?BunFinalizerFn,
+    userdata: ?*anyopaque,
+) JSValue;
+
+extern fn BunEmbed__createTypedArray(
+    global: *JSGlobalObject,
+    kind: u32,
+    data: ?*anyopaque,
+    element_count: usize,
+    finalizer: ?BunFinalizerFn,
+    userdata: ?*anyopaque,
+) JSValue;
+
 const BUN_ACCESSOR_READ_ONLY: u32 = 1 << 0;
 const BUN_ACCESSOR_DONT_ENUM: u32 = 1 << 1;
 const BUN_ACCESSOR_DONT_DELETE: u32 = 1 << 2;
@@ -460,6 +477,21 @@ pub export fn bun_wakeup(rt: ?*BunRuntime) callconv(.c) void {
 // Value Creation
 // ---------------------------------------------------------------------------
 
+/// Must stay in sync with BunTypedArrayKind in bun_embed.h and BunEmbed.cpp.
+const BunTypedArrayKind = enum(u32) {
+    int8 = 0,
+    uint8 = 1,
+    uint8c = 2,
+    int16 = 3,
+    uint16 = 4,
+    int32 = 5,
+    uint32 = 6,
+    float32 = 7,
+    float64 = 8,
+    bigint64 = 9,
+    biguint64 = 10,
+};
+
 pub export fn bun_bool(value: c_int) callconv(.c) BunValue {
     return toBunValue(JSValue.jsBoolean(value != 0));
 }
@@ -581,6 +613,31 @@ pub export fn bun_function(
     }
 
     return toBunValue(js_fn);
+}
+
+pub export fn bun_array_buffer(
+    ctx: ?*BunContext,
+    data: ?*anyopaque,
+    len: usize,
+    finalizer: ?BunFinalizerFn,
+    userdata: ?*anyopaque,
+) callconv(.c) BunValue {
+    const global = toGlobal(ctx) orelse return toBunValue(.js_undefined);
+    const result = BunEmbed__createArrayBuffer(global, data, len, finalizer, userdata);
+    return if (result == .zero) toBunValue(.js_undefined) else toBunValue(result);
+}
+
+pub export fn bun_typed_array(
+    ctx: ?*BunContext,
+    kind: u32,
+    data: ?*anyopaque,
+    element_count: usize,
+    finalizer: ?BunFinalizerFn,
+    userdata: ?*anyopaque,
+) callconv(.c) BunValue {
+    const global = toGlobal(ctx) orelse return toBunValue(.js_undefined);
+    const result = BunEmbed__createTypedArray(global, kind, data, element_count, finalizer, userdata);
+    return if (result == .zero) toBunValue(.js_undefined) else toBunValue(result);
 }
 
 // ---------------------------------------------------------------------------
@@ -934,6 +991,8 @@ comptime {
     _ = &bun_array;
     _ = &bun_global;
     _ = &bun_function;
+    _ = &bun_array_buffer;
+    _ = &bun_typed_array;
     _ = &bun_is_undefined;
     _ = &bun_is_null;
     _ = &bun_is_bool;

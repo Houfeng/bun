@@ -138,6 +138,83 @@ BunValue bun_array(BunContext* ctx, size_t len);
 BunValue bun_global(BunContext* ctx);
 BunValue bun_function(BunContext* ctx, const char* name, BunHostFn fn, void* userdata, int arg_count);
 
+/// Element type for bun_typed_array().
+typedef enum {
+    BUN_INT8_ARRAY = 0,
+    BUN_UINT8_ARRAY = 1,
+    BUN_UINT8C_ARRAY = 2, ///< Uint8ClampedArray
+    BUN_INT16_ARRAY = 3,
+    BUN_UINT16_ARRAY = 4,
+    BUN_INT32_ARRAY = 5,
+    BUN_UINT32_ARRAY = 6,
+    BUN_FLOAT32_ARRAY = 7,
+    BUN_FLOAT64_ARRAY = 8,
+    BUN_BIGINT64_ARRAY = 9,
+    BUN_BIGUINT64_ARRAY = 10,
+} BunTypedArrayKind;
+
+/// Wrap C memory as a JS ArrayBuffer (zero-copy).
+///
+/// The JS ArrayBuffer directly references `data` — no copy is made.
+/// When the GC eventually collects the buffer, `finalizer(userdata)` is called.
+/// Pass NULL for finalizer only if the memory outlives the entire runtime
+/// (e.g. static data, or memory you free yourself at bun_destroy() time).
+///
+/// MEMORY LIFETIME CONTRACT
+///   `data` MUST stay valid until finalizer is called (or until bun_destroy()
+///   if no finalizer). Do NOT free `data` before the runtime is destroyed.
+///
+/// KNOWN LEAK RISK — bun_destroy() does not guarantee finalizer invocation
+///   JSC does not guarantee that every in-flight GC finalizer runs during VM
+///   teardown. If the runtime is destroyed while a buffer is still reachable
+///   from JS (e.g. it was bun_protect()'d and never unprotect()'d, or it is
+///   referenced by a long-lived closure), the finalizer may NOT be called.
+///   For truly critical resources (sockets, file handles, GPU buffers), keep
+///   your own list and release them explicitly before calling bun_destroy().
+///
+/// AVOID DOUBLE-WRAP
+///   Wrapping the same `data` pointer twice creates two independent finalizers;
+///   both will fire and cause a double-free. Each C pointer must be passed to
+///   at most one bun_array_buffer() / bun_typed_array() call.
+///
+/// @param ctx        JS context.
+/// @param data       Backing memory (must remain valid until finalizer fires).
+/// @param len        Byte length.
+/// @param finalizer  Called on GC collection (may be NULL). Must NOT re-enter Bun/JS.
+/// @param userdata   Forwarded verbatim to finalizer.
+/// @return           BunValue holding the JS ArrayBuffer, or BUN_UNDEFINED on failure.
+///                   On failure the finalizer is NOT called — the caller retains ownership.
+BunValue bun_array_buffer(BunContext* ctx, void* data, size_t len,
+    BunFinalizerFn finalizer, void* userdata);
+
+/// Wrap C memory as a JS TypedArray view (zero-copy).
+///
+/// Equivalent to `new Float32Array(arraybuffer)` but zero-copy — the view
+/// directly references the C pointer. finalizer(userdata) fires when the
+/// underlying ArrayBuffer is GC'd (which may be later than the TypedArray
+/// itself if JS code has taken a reference to `.buffer`).
+///
+/// The same MEMORY LIFETIME CONTRACT, LEAK RISK, and AVOID DOUBLE-WRAP rules
+/// from bun_array_buffer() apply here.
+///
+/// CONCURRENT ACCESS
+///   Do NOT write to `data` while bun_run_pending_jobs() may be executing;
+///   there is no internal lock. Synchronize access at the application level.
+///
+/// @param ctx           JS context.
+/// @param kind          Element type (BUN_FLOAT32_ARRAY, BUN_INT32_ARRAY, …).
+/// @param data          Backing memory.
+/// @param element_count Number of *elements* (not bytes). A size_t overflow
+///                      check is performed; the call returns BUN_UNDEFINED and
+///                      does NOT invoke the finalizer if it would overflow.
+/// @param finalizer     Called on GC collection (may be NULL).
+/// @param userdata      Forwarded verbatim to finalizer.
+/// @return              BunValue holding the TypedArray, or BUN_UNDEFINED on failure.
+///                      On failure the finalizer is NOT called — caller retains ownership.
+BunValue bun_typed_array(BunContext* ctx, BunTypedArrayKind kind,
+    void* data, size_t element_count,
+    BunFinalizerFn finalizer, void* userdata);
+
 // --------------------------------------------------------------------------
 // Value Introspection & Conversion
 // --------------------------------------------------------------------------
