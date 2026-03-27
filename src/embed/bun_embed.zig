@@ -699,7 +699,7 @@ pub export fn bun_define_finalizer(
     return 1;
 }
 
-pub export fn bun_set_internal_ptr(ctx: ?*BunContext, object: BunValue, ptr: ?*anyopaque) callconv(.c) void {
+pub export fn bun_set_opaque_ptr(ctx: ?*BunContext, object: BunValue, ptr: ?*anyopaque) callconv(.c) void {
     const global = toGlobal(ctx) orelse return;
     const obj = toJSValue(object);
     if (!obj.isObject()) return;
@@ -708,7 +708,7 @@ pub export fn bun_set_internal_ptr(ctx: ?*BunContext, object: BunValue, ptr: ?*a
     obj.put(global, internal_ptr_key, JSValue.fromPtrAddress(addr));
 }
 
-pub export fn bun_get_internal_ptr(ctx: ?*BunContext, object: BunValue) callconv(.c) ?*anyopaque {
+pub export fn bun_get_opaque_ptr(ctx: ?*BunContext, object: BunValue) callconv(.c) ?*anyopaque {
     const global = toGlobal(ctx) orelse return null;
     const obj = toJSValue(object);
     if (!obj.isObject()) return null;
@@ -828,8 +828,8 @@ comptime {
     _ = &bun_define_setter;
     _ = &bun_define_accessor;
     _ = &bun_define_finalizer;
-    _ = &bun_set_internal_ptr;
-    _ = &bun_get_internal_ptr;
+    _ = &bun_set_opaque_ptr;
+    _ = &bun_get_opaque_ptr;
     _ = &bun_call;
     _ = &bun_call_async;
     _ = &bun_protect;

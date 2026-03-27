@@ -36,7 +36,7 @@ static BunValue counter_inc(BunContext *ctx, int argc, const BunValue *argv, voi
     (void)userdata;
 
     BunValue self = bun_get(ctx, bun_global(ctx), "counter", 7);
-    Counter *counter = (Counter *)bun_get_internal_ptr(ctx, self);
+    Counter *counter = (Counter *)bun_get_opaque_ptr(ctx, self);
     if (!counter) return BUN_UNDEFINED;
 
     counter->value += 1;
@@ -44,13 +44,13 @@ static BunValue counter_inc(BunContext *ctx, int argc, const BunValue *argv, voi
 }
 
 static BunValue counter_get(BunContext *ctx, BunValue this_value) {
-    Counter *counter = (Counter *)bun_get_internal_ptr(ctx, this_value);
+    Counter *counter = (Counter *)bun_get_opaque_ptr(ctx, this_value);
     if (!counter) return BUN_UNDEFINED;
     return bun_int32(counter->value);
 }
 
 static void counter_set(BunContext *ctx, BunValue this_value, BunValue value) {
-    Counter *counter = (Counter *)bun_get_internal_ptr(ctx, this_value);
+    Counter *counter = (Counter *)bun_get_opaque_ptr(ctx, this_value);
     if (!counter) return;
     counter->value = bun_to_int32(value);
 }
@@ -103,7 +103,7 @@ int main(void) {
 
     BunValue counter_obj = bun_object(ctx);
     BunValue inc_fn = bun_function(ctx, "inc", counter_inc, NULL, 0);
-    bun_set_internal_ptr(ctx, counter_obj, counter);
+    bun_set_opaque_ptr(ctx, counter_obj, counter);
     bun_define_finalizer(ctx, counter_obj, counter_finalize, counter);
     bun_set(ctx, counter_obj, "inc", 3, inc_fn);
     bun_define_accessor(ctx, counter_obj, "value", 5, counter_get, counter_set, 0, 0, 0);

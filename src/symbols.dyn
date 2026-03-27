@@ -588,8 +588,8 @@
     _bun_define_setter;
     _bun_define_accessor;
     _bun_define_finalizer;
-    _bun_set_internal_ptr;
-    _bun_get_internal_ptr;
+    _bun_set_opaque_ptr;
+    _bun_get_opaque_ptr;
     _bun_call;
     _bun_call_async;
     _bun_protect;

@@ -195,8 +195,8 @@ int bun_define_finalizer(
     BunFinalizerFn finalizer,
     void *userdata);
 
-void bun_set_internal_ptr(BunContext *ctx, BunValue object, void *ptr);
-void *bun_get_internal_ptr(BunContext *ctx, BunValue object);
+void bun_set_opaque_ptr(BunContext *ctx, BunValue object, void *ptr);
+void *bun_get_opaque_ptr(BunContext *ctx, BunValue object);
 
 // --------------------------------------------------------------------------
 // Function Call & GC Lifetime
