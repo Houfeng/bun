@@ -204,8 +204,28 @@ void* bun_get_opaque(BunContext* ctx, BunValue object);
 // Function Call & GC Lifetime
 // --------------------------------------------------------------------------
 
-BunValue bun_call(BunContext* ctx, BunValue fn, BunValue this_value, int argc, const BunValue* argv);
+/// Result from calling a JavaScript function.
+typedef struct {
+    BunValue value; ///< Return value. BUN_UNDEFINED when had_exception is 1.
+    int had_exception; ///< 1 if a JS exception was thrown, 0 on success.
+    /// Human-readable exception description. Owned by runtime; valid until the
+    /// next bun_call*() or bun_eval*() call on this context's runtime.
+    /// NULL when had_exception == 0.
+    const char* error;
+} BunCallResult;
+
+/// Call a JavaScript function synchronously.
+/// @param ctx        JS context.
+/// @param fn         Callable BunValue.
+/// @param this_value The 'this' binding. Pass BUN_UNDEFINED for global 'this'.
+/// @param argc       Argument count.
+/// @param argv       Argument array (may be NULL when argc == 0).
+/// @return           BunCallResult with value/had_exception/error fields.
+BunCallResult bun_call(BunContext* ctx, BunValue fn, BunValue this_value, int argc, const BunValue* argv);
 int bun_call_async(BunRuntime* rt, BunValue fn, BunValue this_value, int argc, const BunValue* argv);
+
+void bun_protect(BunContext* ctx, BunValue value);
+void bun_unprotect(BunContext* ctx, BunValue value);
 
 void bun_protect(BunContext* ctx, BunValue value);
 void bun_unprotect(BunContext* ctx, BunValue value);

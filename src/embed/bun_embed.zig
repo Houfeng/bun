@@ -23,6 +23,18 @@ const BunFinalizerFn = *const fn (?*anyopaque) callconv(.c) void;
 const HostFnData = struct {
     native_fn: BunHostFn,
     userdata: ?*anyopaque,
+    /// Back-pointer so the GC finalizer can remove this entry from the registry.
+    runtime: *BunRuntime,
+    /// The JSValue key used in host_fn_registry (needed for removal in finalizer).
+    js_fn: JSValue,
+};
+
+/// Per-object side-table entry for opaque pointer + finalizer-dedup guard.
+const OpaqueEntry = struct {
+    /// Native pointer stored by bun_set_opaque().
+    opaque_ptr: ?*anyopaque = null,
+    /// Whether a user finalizer has already been attached via bun_define_finalizer().
+    finalizer_attached: bool = false,
 };
 
 const PendingCall = struct {
@@ -39,6 +51,11 @@ const BunRuntime = struct {
     last_error_buf: ?[*:0]u8 = null,
     pending_calls: std.ArrayListUnmanaged(PendingCall) = .{},
     pending_calls_mutex: std.Thread.Mutex = .{},
+    /// Per-runtime registry of JSValue → HostFnData. Replaces the old global map.
+    host_fn_registry: HostFnMap = .{},
+    /// Per-runtime side-table for opaque pointers and finalizer-dedup guards.
+    /// Keyed by JSValue identity; replaces the old string-property approach.
+    opaque_map: OpaqueMap = .{},
 
     fn captureException(runtime: *BunRuntime, global: *JSGlobalObject, value: JSValue) BunEvalResult {
         // Try to get a string representation via toString()
@@ -77,6 +94,18 @@ const BunRuntime = struct {
         }
         runtime.pending_calls.deinit(bun.default_allocator);
     }
+
+    fn freeHostFnRegistry(runtime: *BunRuntime) void {
+        var it = runtime.host_fn_registry.valueIterator();
+        while (it.next()) |item| {
+            bun.default_allocator.destroy(item.*);
+        }
+        runtime.host_fn_registry.deinit(bun.default_allocator);
+    }
+
+    fn freeOpaqueMap(runtime: *BunRuntime) void {
+        runtime.opaque_map.deinit(bun.default_allocator);
+    }
 };
 
 /// Result struct matching the C BunEvalResult layout.
@@ -85,8 +114,34 @@ const BunEvalResult = extern struct {
     @"error": ?[*:0]const u8,
 };
 
-var hostFnRegistry: HostFnMap = .{};
 const HostFnMap = std.AutoHashMapUnmanaged(JSValue, *HostFnData);
+const OpaqueMap = std.AutoHashMapUnmanaged(JSValue, OpaqueEntry);
+
+/// Global lookup table: VirtualMachine* → *BunRuntime.
+/// Populated in bun_initialize(), removed in bun_destroy().
+/// This is the only remaining global state, and it is necessary because the
+/// hostFnTrampoline's JSC callback only receives the JSGlobalObject; we need
+/// to recover the owning BunRuntime to access its per-runtime registries.
+var vm_to_runtime_map: std.AutoHashMapUnmanaged(*VirtualMachine, *BunRuntime) = .{};
+var vm_to_runtime_mutex: std.Thread.Mutex = .{};
+
+fn vmToRuntime(vm: *VirtualMachine) ?*BunRuntime {
+    vm_to_runtime_mutex.lock();
+    defer vm_to_runtime_mutex.unlock();
+    return vm_to_runtime_map.get(vm);
+}
+
+fn registerRuntime(runtime: *BunRuntime) void {
+    vm_to_runtime_mutex.lock();
+    defer vm_to_runtime_mutex.unlock();
+    vm_to_runtime_map.put(bun.default_allocator, runtime.vm, runtime) catch {};
+}
+
+fn unregisterRuntime(runtime: *BunRuntime) void {
+    vm_to_runtime_mutex.lock();
+    defer vm_to_runtime_mutex.unlock();
+    _ = vm_to_runtime_map.remove(runtime.vm);
+}
 
 fn toBunValue(value: JSValue) BunValue {
     return @as(BunValue, @bitCast(@as(i64, @intFromEnum(value))));
@@ -209,19 +264,17 @@ fn initializeImpl(cwd_ptr: ?[*:0]const u8) !?*BunRuntime {
         .last_error_buf = null,
     };
 
+    registerRuntime(rt);
     return rt;
 }
 
 pub export fn bun_destroy(rt: ?*BunRuntime) callconv(.c) void {
     const runtime = rt orelse return;
+    unregisterRuntime(runtime);
     runtime.freeLastError();
     runtime.freePendingCalls();
-
-    var it = hostFnRegistry.valueIterator();
-    while (it.next()) |item| {
-        bun.default_allocator.destroy(item.*);
-    }
-    hostFnRegistry.deinit(bun.default_allocator);
+    runtime.freeHostFnRegistry();
+    runtime.freeOpaqueMap();
 
     runtime.vm.onExit();
     bun.default_allocator.destroy(runtime);
@@ -359,7 +412,10 @@ const TickContext = struct {
             else
                 @as([*]const JSValue, @ptrCast(call.argv.ptr))[0..call.argv.len];
 
-            _ = fn_value.call(global, this_value, args) catch .js_undefined;
+            _ = fn_value.call(global, this_value, args) catch {
+                // Clear any pending exception so the event loop stays healthy.
+                global.clearException();
+            };
         }
     }
 
@@ -440,7 +496,27 @@ pub export fn bun_global(ctx: ?*BunContext) callconv(.c) BunValue {
 
 fn hostFnTrampoline(global: *JSGlobalObject, callframe: *jsc.CallFrame) callconv(.c) JSValue {
     const callee = callframe.callee();
-    const cb_data = hostFnRegistry.get(callee) orelse return .js_undefined;
+    // Look up in the runtime's per-instance registry via the VM pointer.
+    // We find the runtime by casting the VM's globalObject back: the VM is
+    // embedded in BunRuntime so we stored a pointer in HostFnData itself.
+    // All we need is the registry entry from the callee JSValue.
+    //
+    // To locate the right runtime we stored a back-pointer in HostFnData.
+    // We first peek into the global's VM to find our runtime.  Since
+    // BunRuntime owns the VirtualMachine we can walk it via global.bunVM().
+    const vm = global.bunVM();
+
+    // Find the BunRuntime that owns this VM.  We stored the runtime pointer
+    // in each HostFnData so we just need to look up by callee value.
+    // The trampoline is shared across all bun_function() calls; the callee
+    // JSValue uniquely identifies which HostFnData to use.
+    //
+    // We need the runtime pointer to access host_fn_registry.  We stored it
+    // in HostFnData.runtime so we can recover it once we have the entry — but
+    // we need the registry first.  Bootstrap: keep a small thread-local cache
+    // mapping vm → *BunRuntime.
+    const runtime = vmToRuntime(vm) orelse return .js_undefined;
+    const cb_data = runtime.host_fn_registry.get(callee) orelse return .js_undefined;
     const args = callframe.arguments();
 
     const result = cb_data.native_fn(
@@ -450,6 +526,15 @@ fn hostFnTrampoline(global: *JSGlobalObject, callframe: *jsc.CallFrame) callconv
         cb_data.userdata,
     );
     return toJSValue(result);
+}
+
+/// GC finalizer called when a bun_function() JS function is collected.
+/// Removes HostFnData from the registry and frees the allocation.
+fn hostFnFinalizer(userdata: ?*anyopaque) callconv(.c) void {
+    const cb_data: *HostFnData = @ptrCast(@alignCast(userdata orelse return));
+    const runtime = cb_data.runtime;
+    _ = runtime.host_fn_registry.remove(cb_data.js_fn);
+    bun.default_allocator.destroy(cb_data);
 }
 
 pub export fn bun_function(
@@ -462,6 +547,7 @@ pub export fn bun_function(
     const global = toGlobal(ctx) orelse return toBunValue(.js_undefined);
     const name = if (name_ptr) |p| std.mem.span(p) else return toBunValue(.js_undefined);
     const fn_ptr = native_fn orelse return toBunValue(.js_undefined);
+    const runtime = vmToRuntime(global.bunVM()) orelse return toBunValue(.js_undefined);
 
     const js_fn = JSFunction__createFromZig(
         global,
@@ -478,12 +564,21 @@ pub export fn bun_function(
     cb_data.* = .{
         .native_fn = fn_ptr,
         .userdata = userdata,
+        .runtime = runtime,
+        .js_fn = js_fn,
     };
 
-    hostFnRegistry.put(bun.default_allocator, js_fn, cb_data) catch {
+    runtime.host_fn_registry.put(bun.default_allocator, js_fn, cb_data) catch {
         bun.default_allocator.destroy(cb_data);
         return toBunValue(.js_undefined);
     };
+
+    // Attach a GC finalizer so HostFnData is freed and the registry entry is
+    // removed when the JS function is garbage-collected.
+    if (!BunEmbed__defineFinalizer(global, js_fn, hostFnFinalizer, cb_data)) {
+        // Finalizer failed — still usable, but will leak on GC (only freed at bun_destroy).
+        // This is acceptable degraded behaviour rather than failing the whole call.
+    }
 
     return toBunValue(js_fn);
 }
@@ -676,9 +771,6 @@ pub export fn bun_define_accessor(
     return if (BunEmbed__defineCustomAccessor(global, toJSValue(object), key, key_len, getter, setter, flags)) 1 else 0;
 }
 
-const internal_ptr_key = "__bun_internal_ptr__";
-const finalizer_attached_key = "__bun_finalizer_attached__";
-
 pub export fn bun_define_finalizer(
     ctx: ?*BunContext,
     object: BunValue,
@@ -689,14 +781,15 @@ pub export fn bun_define_finalizer(
     const callback = finalizer orelse return 0;
     const obj = toJSValue(object);
     if (!obj.isObject()) return 0;
+    const runtime = vmToRuntime(global.bunVM()) orelse return 0;
 
-    const existing = obj.getPropertyValue(global, finalizer_attached_key) catch null;
-    if (existing != null) return 0;
+    // Use the opaque_map to guard against double-attachment.
+    const result = runtime.opaque_map.getOrPut(bun.default_allocator, obj) catch return 0;
+    if (result.found_existing and result.value_ptr.finalizer_attached) return 0;
+    if (!result.found_existing) result.value_ptr.* = .{};
+    result.value_ptr.finalizer_attached = true;
 
-    if (!BunEmbed__defineFinalizer(global, obj, callback, userdata)) return 0;
-
-    obj.put(global, finalizer_attached_key, JSValue.jsBoolean(true));
-    return 1;
+    return if (BunEmbed__defineFinalizer(global, obj, callback, userdata)) 1 else 0;
 }
 
 pub export fn bun_set_prototype(ctx: ?*BunContext, object: BunValue, proto: BunValue) callconv(.c) c_int {
@@ -715,28 +808,33 @@ pub export fn bun_set_opaque(ctx: ?*BunContext, object: BunValue, opaque_ptr: ?*
     const global = toGlobal(ctx) orelse return;
     const obj = toJSValue(object);
     if (!obj.isObject()) return;
+    const runtime = vmToRuntime(global.bunVM()) orelse return;
 
-    const addr = if (opaque_ptr) |p| @intFromPtr(p) else 0;
-    obj.put(global, internal_ptr_key, JSValue.fromPtrAddress(addr));
+    const result = runtime.opaque_map.getOrPut(bun.default_allocator, obj) catch return;
+    if (!result.found_existing) result.value_ptr.* = .{};
+    result.value_ptr.opaque_ptr = opaque_ptr;
 }
 
 pub export fn bun_get_opaque(ctx: ?*BunContext, object: BunValue) callconv(.c) ?*anyopaque {
     const global = toGlobal(ctx) orelse return null;
     const obj = toJSValue(object);
     if (!obj.isObject()) return null;
+    const runtime = vmToRuntime(global.bunVM()) orelse return null;
 
-    const value = obj.getPropertyValue(global, internal_ptr_key) catch return null;
-    const ptr_value = value orelse return null;
-    if (!ptr_value.isNumber()) return null;
-
-    const addr = ptr_value.asPtrAddress();
-    if (addr == 0) return null;
-    return @ptrFromInt(addr);
+    const entry = runtime.opaque_map.get(obj) orelse return null;
+    return entry.opaque_ptr;
 }
 
 // ---------------------------------------------------------------------------
 // Function Call & GC Lifetime
 // ---------------------------------------------------------------------------
+
+/// Result struct matching the C BunCallResult layout.
+const BunCallResult = extern struct {
+    value: BunValue,
+    had_exception: c_int,
+    @"error": ?[*:0]const u8,
+};
 
 pub export fn bun_call(
     ctx: ?*BunContext,
@@ -744,10 +842,10 @@ pub export fn bun_call(
     this_value: BunValue,
     argc: c_int,
     argv: ?[*]const BunValue,
-) callconv(.c) BunValue {
-    const global = toGlobal(ctx) orelse return toBunValue(.js_undefined);
+) callconv(.c) BunCallResult {
+    const global = toGlobal(ctx) orelse return .{ .value = toBunValue(.js_undefined), .had_exception = 1, .@"error" = "null context" };
     const function = toJSValue(fn_value);
-    if (!function.isCallable()) return toBunValue(.js_undefined);
+    if (!function.isCallable()) return .{ .value = toBunValue(.js_undefined), .had_exception = 1, .@"error" = "not callable" };
 
     const argc_u: usize = if (argc > 0) @intCast(argc) else 0;
     const args: []const JSValue = if (argc_u == 0)
@@ -755,10 +853,23 @@ pub export fn bun_call(
     else if (argv) |p|
         @as([*]const JSValue, @ptrCast(p))[0..argc_u]
     else
-        return toBunValue(.js_undefined);
+        return .{ .value = toBunValue(.js_undefined), .had_exception = 1, .@"error" = "null argv" };
 
-    const result = function.call(global, toJSValue(this_value), args) catch return toBunValue(.js_undefined);
-    return toBunValue(result);
+    const result = function.call(global, toJSValue(this_value), args) catch {
+        // An exception was thrown — capture it via the runtime's error buffer.
+        const runtime = vmToRuntime(global.bunVM());
+        if (runtime) |rt| {
+            if (global.tryTakeException()) |exc| {
+                const eval_result = rt.captureException(global, exc);
+                return .{ .value = toBunValue(.js_undefined), .had_exception = 1, .@"error" = eval_result.@"error" };
+            }
+        } else {
+            // No runtime in map — at least clear the exception so JSC stays healthy.
+            global.clearException();
+        }
+        return .{ .value = toBunValue(.js_undefined), .had_exception = 1, .@"error" = "exception" };
+    };
+    return .{ .value = toBunValue(result), .had_exception = 0, .@"error" = null };
 }
 
 pub export fn bun_call_async(
