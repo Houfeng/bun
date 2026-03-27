@@ -699,6 +699,18 @@ pub export fn bun_define_finalizer(
     return 1;
 }
 
+pub export fn bun_set_prototype(ctx: ?*BunContext, object: BunValue, proto: BunValue) callconv(.c) c_int {
+    const global = toGlobal(ctx) orelse return 0;
+    const obj = toJSValue(object);
+    const prototype = toJSValue(proto);
+
+    if (!obj.isObject()) return 0;
+    if (!prototype.isObject() and !prototype.isNull()) return 0;
+
+    obj.setPrototypeDirect(prototype, global) catch return 0;
+    return 1;
+}
+
 pub export fn bun_set_opaque_ptr(ctx: ?*BunContext, object: BunValue, ptr: ?*anyopaque) callconv(.c) void {
     const global = toGlobal(ctx) orelse return;
     const obj = toJSValue(object);

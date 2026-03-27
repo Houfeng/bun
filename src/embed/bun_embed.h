@@ -34,25 +34,25 @@ typedef uint64_t BunValue;
 
 /// Result from evaluating JavaScript code.
 typedef struct {
-    int success;         // 1 if evaluation succeeded, 0 if failed
-    const char *error;   // Error description if success == 0. Owned by runtime, valid until next bun_eval_string* call.
+    int success; // 1 if evaluation succeeded, 0 if failed
+    const char* error; // Error description if success == 0. Owned by runtime, valid until next bun_eval_string* call.
 } BunEvalResult;
 
 /// Host function callback callable from JavaScript.
 /// argv points to contiguous BunValue arguments valid only for this call.
-typedef BunValue (*BunHostFn)(BunContext *ctx, int argc, const BunValue *argv, void *userdata);
+typedef BunValue (*BunHostFn)(BunContext* ctx, int argc, const BunValue* argv, void* userdata);
 
 /// Custom getter callback for bun_define_accessor().
-typedef BunValue (*BunGetterFn)(BunContext *ctx, BunValue this_value);
+typedef BunValue (*BunGetterFn)(BunContext* ctx, BunValue this_value);
 
 /// Custom setter callback for bun_define_accessor().
-typedef void (*BunSetterFn)(BunContext *ctx, BunValue this_value, BunValue value);
+typedef void (*BunSetterFn)(BunContext* ctx, BunValue this_value, BunValue value);
 
 /// Finalizer callback for bun_define_finalizer().
 ///
 /// This runs during GC finalization. It must not call back into Bun/JS APIs.
 /// Use it only to release native resources associated with the object.
-typedef void (*BunFinalizerFn)(void *userdata);
+typedef void (*BunFinalizerFn)(void* userdata);
 
 /// Predefined immediate values in JSValue64 mode.
 #define BUN_UNDEFINED ((BunValue)0xAULL)
@@ -68,13 +68,13 @@ typedef void (*BunFinalizerFn)(void *userdata);
 /// drive the event loop (typically the main/GUI thread).
 /// @param cwd  Working directory (UTF-8, null-terminated). Pass NULL for current dir.
 /// @return  Runtime handle, or NULL on failure.
-BunRuntime *bun_initialize(const char *cwd);
+BunRuntime* bun_initialize(const char* cwd);
 
 /// Destroy a Bun runtime and free all resources.
-void bun_destroy(BunRuntime *rt);
+void bun_destroy(BunRuntime* rt);
 
 /// Get the current JS context for this runtime.
-BunContext *bun_context(BunRuntime *rt);
+BunContext* bun_context(BunRuntime* rt);
 
 // --------------------------------------------------------------------------
 // Evaluation
@@ -85,13 +85,13 @@ BunContext *bun_context(BunRuntime *rt);
 /// @param code  UTF-8 source code, null-terminated.
 /// @return      Evaluation result. The result and error strings are valid until
 ///              the next bun_eval*/bun_run_pending_jobs call on this runtime.
-BunEvalResult bun_eval_string(BunRuntime *rt, const char *code);
+BunEvalResult bun_eval_string(BunRuntime* rt, const char* code);
 
 /// Load and evaluate a JavaScript/TypeScript file as an ES module.
 /// @param rt    Runtime handle.
 /// @param path  UTF-8 file path, null-terminated. Relative paths resolve from cwd.
 /// @return      Evaluation result.
-BunEvalResult bun_eval_file(BunRuntime *rt, const char *path);
+BunEvalResult bun_eval_file(BunRuntime* rt, const char* path);
 
 // --------------------------------------------------------------------------
 // Event Loop Integration
@@ -105,17 +105,17 @@ BunEvalResult bun_eval_file(BunRuntime *rt, const char *path);
 ///
 /// @param rt  Runtime handle.
 /// @return    1 if the event loop has more pending work, 0 if idle.
-int bun_run_pending_jobs(BunRuntime *rt);
+int bun_run_pending_jobs(BunRuntime* rt);
 
 /// Get the underlying OS event loop file descriptor (epoll fd on Linux,
 /// kqueue fd on macOS). You can monitor this fd in your GUI's event loop
 /// (e.g., via CFFileDescriptor/GSource) and call bun_run_pending_jobs()
 /// when it becomes readable. Returns -1 on Windows or if unavailable.
-int bun_get_event_fd(BunRuntime *rt);
+int bun_get_event_fd(BunRuntime* rt);
 
 /// Thread-safe: wake up the event loop from any thread. After calling this,
 /// the next bun_run_pending_jobs() will process any concurrently queued work.
-void bun_wakeup(BunRuntime *rt);
+void bun_wakeup(BunRuntime* rt);
 
 // --------------------------------------------------------------------------
 // Value Creation
@@ -124,11 +124,11 @@ void bun_wakeup(BunRuntime *rt);
 BunValue bun_bool(int value);
 BunValue bun_number(double value);
 BunValue bun_int32(int32_t value);
-BunValue bun_string(BunContext *ctx, const char *utf8, size_t len);
-BunValue bun_object(BunContext *ctx);
-BunValue bun_array(BunContext *ctx, size_t len);
-BunValue bun_global(BunContext *ctx);
-BunValue bun_function(BunContext *ctx, const char *name, BunHostFn fn, void *userdata, int arg_count);
+BunValue bun_string(BunContext* ctx, const char* utf8, size_t len);
+BunValue bun_object(BunContext* ctx);
+BunValue bun_array(BunContext* ctx, size_t len);
+BunValue bun_global(BunContext* ctx);
+BunValue bun_function(BunContext* ctx, const char* name, BunHostFn fn, void* userdata, int arg_count);
 
 // --------------------------------------------------------------------------
 // Value Introspection & Conversion
@@ -143,45 +143,45 @@ int bun_is_object(BunValue value);
 int bun_is_callable(BunValue value);
 
 int bun_to_bool(BunValue value);
-double bun_to_number(BunContext *ctx, BunValue value);
+double bun_to_number(BunContext* ctx, BunValue value);
 int32_t bun_to_int32(BunValue value);
 
 /// Returns a newly allocated UTF-8 string. Caller must free() the returned pointer.
 /// On failure, returns NULL.
-char *bun_to_utf8(BunContext *ctx, BunValue value, size_t *out_len);
+char* bun_to_utf8(BunContext* ctx, BunValue value, size_t* out_len);
 
 // --------------------------------------------------------------------------
 // Object & Property Operations
 // --------------------------------------------------------------------------
 
-int bun_set(BunContext *ctx, BunValue object, const char *key, size_t key_len, BunValue value);
-BunValue bun_get(BunContext *ctx, BunValue object, const char *key, size_t key_len);
+int bun_set(BunContext* ctx, BunValue object, const char* key, size_t key_len, BunValue value);
+BunValue bun_get(BunContext* ctx, BunValue object, const char* key, size_t key_len);
 
-int bun_set_index(BunContext *ctx, BunValue object, uint32_t index, BunValue value);
-BunValue bun_get_index(BunContext *ctx, BunValue object, uint32_t index);
+int bun_set_index(BunContext* ctx, BunValue object, uint32_t index, BunValue value);
+BunValue bun_get_index(BunContext* ctx, BunValue object, uint32_t index);
 
 int bun_define_getter(
-    BunContext *ctx,
+    BunContext* ctx,
     BunValue object,
-    const char *key,
+    const char* key,
     size_t key_len,
     BunGetterFn getter,
     int dont_enum,
     int dont_delete);
 
 int bun_define_setter(
-    BunContext *ctx,
+    BunContext* ctx,
     BunValue object,
-    const char *key,
+    const char* key,
     size_t key_len,
     BunSetterFn setter,
     int dont_enum,
     int dont_delete);
 
 int bun_define_accessor(
-    BunContext *ctx,
+    BunContext* ctx,
     BunValue object,
-    const char *key,
+    const char* key,
     size_t key_len,
     BunGetterFn getter,
     BunSetterFn setter,
@@ -190,23 +190,25 @@ int bun_define_accessor(
     int dont_delete);
 
 int bun_define_finalizer(
-    BunContext *ctx,
+    BunContext* ctx,
     BunValue object,
     BunFinalizerFn finalizer,
-    void *userdata);
+    void* userdata);
 
-void bun_set_opaque_ptr(BunContext *ctx, BunValue object, void *ptr);
-void *bun_get_opaque_ptr(BunContext *ctx, BunValue object);
+int bun_set_prototype(BunContext* ctx, BunValue object, BunValue proto);
+
+void bun_set_opaque_ptr(BunContext* ctx, BunValue object, void* ptr);
+void* bun_get_opaque_ptr(BunContext* ctx, BunValue object);
 
 // --------------------------------------------------------------------------
 // Function Call & GC Lifetime
 // --------------------------------------------------------------------------
 
-BunValue bun_call(BunContext *ctx, BunValue fn, BunValue this_value, int argc, const BunValue *argv);
-int bun_call_async(BunRuntime *rt, BunValue fn, BunValue this_value, int argc, const BunValue *argv);
+BunValue bun_call(BunContext* ctx, BunValue fn, BunValue this_value, int argc, const BunValue* argv);
+int bun_call_async(BunRuntime* rt, BunValue fn, BunValue this_value, int argc, const BunValue* argv);
 
-void bun_protect(BunContext *ctx, BunValue value);
-void bun_unprotect(BunContext *ctx, BunValue value);
+void bun_protect(BunContext* ctx, BunValue value);
+void bun_unprotect(BunContext* ctx, BunValue value);
 
 #ifdef __cplusplus
 }
