@@ -829,23 +829,20 @@ pub export fn bun_get_opaque(ctx: ?*BunContext, object: BunValue) callconv(.c) ?
 // Function Call & GC Lifetime
 // ---------------------------------------------------------------------------
 
-/// Result struct matching the C BunCallResult layout.
-const BunCallResult = extern struct {
-    value: BunValue,
-    had_exception: c_int,
-    @"error": ?[*:0]const u8,
-};
-
 pub export fn bun_call(
     ctx: ?*BunContext,
     fn_value: BunValue,
     this_value: BunValue,
     argc: c_int,
     argv: ?[*]const BunValue,
-) callconv(.c) BunCallResult {
-    const global = toGlobal(ctx) orelse return .{ .value = toBunValue(.js_undefined), .had_exception = 1, .@"error" = "null context" };
+) callconv(.c) BunValue {
+    const global = toGlobal(ctx) orelse return 0;
+    const runtime = vmToRuntime(global.bunVM());
+    // Clear any stale error so bun_last_error() is NULL after a successful call.
+    if (runtime) |rt| rt.freeLastError();
+
     const function = toJSValue(fn_value);
-    if (!function.isCallable()) return .{ .value = toBunValue(.js_undefined), .had_exception = 1, .@"error" = "not callable" };
+    if (!function.isCallable()) return 0;
 
     const argc_u: usize = if (argc > 0) @intCast(argc) else 0;
     const args: []const JSValue = if (argc_u == 0)
@@ -853,23 +850,28 @@ pub export fn bun_call(
     else if (argv) |p|
         @as([*]const JSValue, @ptrCast(p))[0..argc_u]
     else
-        return .{ .value = toBunValue(.js_undefined), .had_exception = 1, .@"error" = "null argv" };
+        return 0;
 
     const result = function.call(global, toJSValue(this_value), args) catch {
-        // An exception was thrown — capture it via the runtime's error buffer.
-        const runtime = vmToRuntime(global.bunVM());
+        // Capture the exception message into last_error_buf so the caller
+        // can retrieve it with bun_last_error().
         if (runtime) |rt| {
             if (global.tryTakeException()) |exc| {
-                const eval_result = rt.captureException(global, exc);
-                return .{ .value = toBunValue(.js_undefined), .had_exception = 1, .@"error" = eval_result.@"error" };
+                _ = rt.captureException(global, exc);
             }
         } else {
-            // No runtime in map — at least clear the exception so JSC stays healthy.
             global.clearException();
         }
-        return .{ .value = toBunValue(.js_undefined), .had_exception = 1, .@"error" = "exception" };
+        return 0; // BUN_EXCEPTION sentinel
     };
-    return .{ .value = toBunValue(result), .had_exception = 0, .@"error" = null };
+    return toBunValue(result);
+}
+
+/// Return the latest error string stored by bun_call() or bun_eval*().
+pub export fn bun_last_error(ctx: ?*BunContext) callconv(.c) ?[*:0]const u8 {
+    const global = toGlobal(ctx) orelse return null;
+    const runtime = vmToRuntime(global.bunVM()) orelse return null;
+    return runtime.last_error_buf;
 }
 
 pub export fn bun_call_async(
@@ -954,6 +956,7 @@ comptime {
     _ = &bun_set_opaque;
     _ = &bun_get_opaque;
     _ = &bun_call;
+    _ = &bun_last_error;
     _ = &bun_call_async;
     _ = &bun_protect;
     _ = &bun_unprotect;

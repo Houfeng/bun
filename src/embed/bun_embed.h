@@ -60,6 +60,11 @@ typedef void (*BunFinalizerFn)(void* userdata);
 #define BUN_TRUE ((BunValue)0x7ULL)
 #define BUN_FALSE ((BunValue)0x6ULL)
 
+/// Sentinel returned by bun_call() when a JavaScript exception was thrown.
+/// This is JSC's internal zero/exception sentinel and is never a valid
+/// return value from a successful call.
+#define BUN_EXCEPTION ((BunValue)0ULL)
+
 // --------------------------------------------------------------------------
 // Lifecycle
 // --------------------------------------------------------------------------
@@ -204,24 +209,23 @@ void* bun_get_opaque(BunContext* ctx, BunValue object);
 // Function Call & GC Lifetime
 // --------------------------------------------------------------------------
 
-/// Result from calling a JavaScript function.
-typedef struct {
-    BunValue value; ///< Return value. BUN_UNDEFINED when had_exception is 1.
-    int had_exception; ///< 1 if a JS exception was thrown, 0 on success.
-    /// Human-readable exception description. Owned by runtime; valid until the
-    /// next bun_call*() or bun_eval*() call on this context's runtime.
-    /// NULL when had_exception == 0.
-    const char* error;
-} BunCallResult;
-
 /// Call a JavaScript function synchronously.
+///
 /// @param ctx        JS context.
 /// @param fn         Callable BunValue.
 /// @param this_value The 'this' binding. Pass BUN_UNDEFINED for global 'this'.
 /// @param argc       Argument count.
 /// @param argv       Argument array (may be NULL when argc == 0).
-/// @return           BunCallResult with value/had_exception/error fields.
-BunCallResult bun_call(BunContext* ctx, BunValue fn, BunValue this_value, int argc, const BunValue* argv);
+/// @return           The JS return value on success, or BUN_EXCEPTION (0) if a
+///                   JS exception was thrown. Call bun_last_error(ctx) to read
+///                   the exception message after a BUN_EXCEPTION return.
+BunValue bun_call(BunContext* ctx, BunValue fn, BunValue this_value, int argc, const BunValue* argv);
+
+/// Return the error string from the most recent bun_call()/bun_eval*() that
+/// failed on this context. Owned by the runtime; valid until the next
+/// bun_call()/bun_eval*() call. Returns NULL if no error is pending.
+const char* bun_last_error(BunContext* ctx);
+
 int bun_call_async(BunRuntime* rt, BunValue fn, BunValue this_value, int argc, const BunValue* argv);
 
 void bun_protect(BunContext* ctx, BunValue value);

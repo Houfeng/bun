@@ -139,9 +139,11 @@ int main(void)
     r = bun_eval_string(rt, "globalThis.throwingFn = () => { throw new Error('boom'); };");
     if (r.success) {
         BunValue throwing_fn = bun_get(ctx, global, "throwingFn", 10);
-        BunCallResult call_result = bun_call(ctx, throwing_fn, BUN_UNDEFINED, 0, NULL);
-        if (call_result.had_exception)
-            printf("bun_call caught exception: %s\n", call_result.error ? call_result.error : "(no message)");
+        BunValue result = bun_call(ctx, throwing_fn, BUN_UNDEFINED, 0, NULL);
+        if (result == BUN_EXCEPTION) {
+            const char* err = bun_last_error(ctx);
+            printf("bun_call caught exception: %s\n", err ? err : "(no message)");
+        }
     }
 
     // Schedule a timer to demonstrate event loop integration
