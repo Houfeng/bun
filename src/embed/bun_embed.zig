@@ -711,16 +711,16 @@ pub export fn bun_set_prototype(ctx: ?*BunContext, object: BunValue, proto: BunV
     return 1;
 }
 
-pub export fn bun_set_opaque_ptr(ctx: ?*BunContext, object: BunValue, ptr: ?*anyopaque) callconv(.c) void {
+pub export fn bun_set_opaque(ctx: ?*BunContext, object: BunValue, opaque_ptr: ?*anyopaque) callconv(.c) void {
     const global = toGlobal(ctx) orelse return;
     const obj = toJSValue(object);
     if (!obj.isObject()) return;
 
-    const addr = if (ptr) |p| @intFromPtr(p) else 0;
+    const addr = if (opaque_ptr) |p| @intFromPtr(p) else 0;
     obj.put(global, internal_ptr_key, JSValue.fromPtrAddress(addr));
 }
 
-pub export fn bun_get_opaque_ptr(ctx: ?*BunContext, object: BunValue) callconv(.c) ?*anyopaque {
+pub export fn bun_get_opaque(ctx: ?*BunContext, object: BunValue) callconv(.c) ?*anyopaque {
     const global = toGlobal(ctx) orelse return null;
     const obj = toJSValue(object);
     if (!obj.isObject()) return null;
@@ -840,8 +840,8 @@ comptime {
     _ = &bun_define_setter;
     _ = &bun_define_accessor;
     _ = &bun_define_finalizer;
-    _ = &bun_set_opaque_ptr;
-    _ = &bun_get_opaque_ptr;
+    _ = &bun_set_opaque;
+    _ = &bun_get_opaque;
     _ = &bun_call;
     _ = &bun_call_async;
     _ = &bun_protect;

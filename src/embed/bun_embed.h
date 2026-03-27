@@ -197,8 +197,8 @@ int bun_define_finalizer(
 
 int bun_set_prototype(BunContext* ctx, BunValue object, BunValue proto);
 
-void bun_set_opaque_ptr(BunContext* ctx, BunValue object, void* ptr);
-void* bun_get_opaque_ptr(BunContext* ctx, BunValue object);
+void bun_set_opaque(BunContext* ctx, BunValue object, void* opaque_ptr);
+void* bun_get_opaque(BunContext* ctx, BunValue object);
 
 // --------------------------------------------------------------------------
 // Function Call & GC Lifetime

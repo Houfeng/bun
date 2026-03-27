@@ -15,12 +15,14 @@ typedef struct {
     int value;
 } Counter;
 
-static void counter_finalize(void *userdata) {
-    Counter *counter = (Counter *)userdata;
+static void counter_finalize(void* userdata)
+{
+    Counter* counter = (Counter*)userdata;
     free(counter);
 }
 
-static BunValue native_add(BunContext *ctx, int argc, const BunValue *argv, void *userdata) {
+static BunValue native_add(BunContext* ctx, int argc, const BunValue* argv, void* userdata)
+{
     (void)ctx;
     (void)userdata;
     if (argc < 2 || !argv) return BUN_UNDEFINED;
@@ -30,37 +32,41 @@ static BunValue native_add(BunContext *ctx, int argc, const BunValue *argv, void
     return bun_number(a + b);
 }
 
-static BunValue counter_inc(BunContext *ctx, int argc, const BunValue *argv, void *userdata) {
+static BunValue counter_inc(BunContext* ctx, int argc, const BunValue* argv, void* userdata)
+{
     (void)argc;
     (void)argv;
     (void)userdata;
 
     BunValue self = bun_get(ctx, bun_global(ctx), "counter", 7);
-    Counter *counter = (Counter *)bun_get_opaque_ptr(ctx, self);
+    Counter* counter = (Counter*)bun_get_opaque(ctx, self);
     if (!counter) return BUN_UNDEFINED;
 
     counter->value += 1;
     return bun_int32(counter->value);
 }
 
-static BunValue counter_get(BunContext *ctx, BunValue this_value) {
-    Counter *counter = (Counter *)bun_get_opaque_ptr(ctx, this_value);
+static BunValue counter_get(BunContext* ctx, BunValue this_value)
+{
+    Counter* counter = (Counter*)bun_get_opaque(ctx, this_value);
     if (!counter) return BUN_UNDEFINED;
     return bun_int32(counter->value);
 }
 
-static void counter_set(BunContext *ctx, BunValue this_value, BunValue value) {
-    Counter *counter = (Counter *)bun_get_opaque_ptr(ctx, this_value);
+static void counter_set(BunContext* ctx, BunValue this_value, BunValue value)
+{
+    Counter* counter = (Counter*)bun_get_opaque(ctx, this_value);
     if (!counter) return;
     counter->value = bun_to_int32(value);
 }
 
-static BunValue native_greet(BunContext *ctx, int argc, const BunValue *argv, void *userdata) {
+static BunValue native_greet(BunContext* ctx, int argc, const BunValue* argv, void* userdata)
+{
     (void)userdata;
 
-    const char *default_name = "World";
-    const char *name = default_name;
-    char *owned_name = NULL;
+    const char* default_name = "World";
+    const char* name = default_name;
+    char* owned_name = NULL;
     size_t owned_len = 0;
 
     if (argc >= 1 && argv) {
@@ -75,16 +81,17 @@ static BunValue native_greet(BunContext *ctx, int argc, const BunValue *argv, vo
     return bun_string(ctx, buf, strlen(buf));
 }
 
-int main(void) {
+int main(void)
+{
     printf("Initializing Bun runtime...\n");
 
-    BunRuntime *rt = bun_initialize(NULL);
+    BunRuntime* rt = bun_initialize(NULL);
     if (!rt) {
         fprintf(stderr, "Failed to initialize Bun runtime\n");
         return 1;
     }
 
-    BunContext *ctx = bun_context(rt);
+    BunContext* ctx = bun_context(rt);
     BunValue global = bun_global(ctx);
 
     BunValue add_fn = bun_function(ctx, "nativeAdd", native_add, NULL, 2);
@@ -93,7 +100,7 @@ int main(void) {
     bun_set(ctx, global, "nativeAdd", 9, add_fn);
     bun_set(ctx, global, "nativeGreet", 11, greet_fn);
 
-    Counter *counter = malloc(sizeof(*counter));
+    Counter* counter = malloc(sizeof(*counter));
     if (!counter) {
         fprintf(stderr, "Failed to allocate counter\n");
         bun_destroy(rt);
@@ -103,7 +110,7 @@ int main(void) {
 
     BunValue counter_obj = bun_object(ctx);
     BunValue inc_fn = bun_function(ctx, "inc", counter_inc, NULL, 0);
-    bun_set_opaque_ptr(ctx, counter_obj, counter);
+    bun_set_opaque(ctx, counter_obj, counter);
     bun_define_finalizer(ctx, counter_obj, counter_finalize, counter);
     bun_set(ctx, counter_obj, "inc", 3, inc_fn);
     bun_define_accessor(ctx, counter_obj, "value", 5, counter_get, counter_set, 0, 0, 0);
@@ -125,8 +132,7 @@ int main(void) {
         "console.log('counter.value =', counter.value);"
         "counter.value = 42;"
         "console.log('counter.inc() =', counter.inc());"
-        "console.log('counter.value =', counter.value);"
-    );
+        "console.log('counter.value =', counter.value);");
     if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
 
     // Schedule a timer to demonstrate event loop integration
@@ -136,8 +142,7 @@ int main(void) {
         "  count++;"
         "  console.log('Timer tick', count);"
         "  if (count >= 3) clearInterval(timer);"
-        "}, 100);"
-    );
+        "}, 100);");
     if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
 
     printf("\n--- Running event loop ---\n");
@@ -147,7 +152,7 @@ int main(void) {
             printf("Event loop idle, stopping.\n");
             break;
         }
-        usleep(50000);  // 50ms - simulate frame rate
+        usleep(50000); // 50ms - simulate frame rate
     }
 
     printf("\nDestroying Bun runtime...\n");
