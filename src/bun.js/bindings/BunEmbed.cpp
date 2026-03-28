@@ -13,6 +13,7 @@
 
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -58,6 +59,19 @@ struct BunEmbedClassDescriptor {
     size_t property_count;
     const BunEmbedClassMethodDescriptor* methods;
     size_t method_count;
+};
+
+struct BunEmbedArrayBufferInfo {
+    void* data;
+    size_t byte_length;
+};
+
+struct BunEmbedTypedArrayInfo {
+    void* data;
+    size_t byte_offset;
+    size_t byte_length;
+    size_t element_count;
+    uint32_t kind;
 };
 
 struct BunEmbedRegisteredClass;
@@ -486,6 +500,36 @@ enum BunTypedArrayKind : uint32_t {
     BunTypedArrayKindBigUint64 = 10,
 };
 
+static std::optional<uint32_t> bunTypedArrayKindFromType(JSC::TypedArrayType type)
+{
+    switch (type) {
+    case TypeInt8:
+        return BunTypedArrayKindInt8;
+    case TypeUint8:
+        return BunTypedArrayKindUint8;
+    case TypeUint8Clamped:
+        return BunTypedArrayKindUint8C;
+    case TypeInt16:
+        return BunTypedArrayKindInt16;
+    case TypeUint16:
+        return BunTypedArrayKindUint16;
+    case TypeInt32:
+        return BunTypedArrayKindInt32;
+    case TypeUint32:
+        return BunTypedArrayKindUint32;
+    case TypeFloat32:
+        return BunTypedArrayKindFloat32;
+    case TypeFloat64:
+        return BunTypedArrayKindFloat64;
+    case TypeBigInt64:
+        return BunTypedArrayKindBigInt64;
+    case TypeBigUint64:
+        return BunTypedArrayKindBigUint64;
+    default:
+        return std::nullopt;
+    }
+}
+
 /// Create a JS ArrayBuffer that directly references external C memory.
 /// finalizer(userdata) is called by the GC when the buffer is collected.
 /// Returns zero (exception sentinel) on failure.
@@ -645,6 +689,59 @@ extern "C" JSC::EncodedJSValue BunEmbed__createTypedArray(
         return {};
 
     return JSValue::encode(view);
+}
+
+extern "C" bool BunEmbed__getArrayBuffer(
+    JSGlobalObject* globalObject,
+    EncodedJSValue value,
+    BunEmbedArrayBufferInfo* out)
+{
+    if (out)
+        *out = {};
+    if (!globalObject || !out)
+        return false;
+
+    auto* arrayBuffer = jsDynamicCast<JSArrayBuffer*>(JSValue::decode(value));
+    if (!arrayBuffer)
+        return false;
+
+    auto* impl = arrayBuffer->impl();
+    if (!impl || impl->isDetached())
+        return false;
+
+    out->data = impl->byteLength() > 0 ? impl->data() : nullptr;
+    out->byte_length = impl->byteLength();
+    return true;
+}
+
+extern "C" bool BunEmbed__getTypedArray(
+    JSGlobalObject* globalObject,
+    EncodedJSValue value,
+    BunEmbedTypedArrayInfo* out)
+{
+    if (out)
+        *out = {};
+    if (!globalObject || !out)
+        return false;
+
+    JSValue jsValue = JSValue::decode(value);
+    if (!jsValue.isCell() || !isTypedArrayType(jsValue.asCell()->type()))
+        return false;
+
+    auto* view = jsDynamicCast<JSArrayBufferView*>(jsValue);
+    if (!view || view->isDetached())
+        return false;
+
+    auto kind = bunTypedArrayKindFromType(typedArrayType(view->type()));
+    if (!kind)
+        return false;
+
+    out->data = view->byteLength() > 0 ? view->vector() : nullptr;
+    out->byte_offset = view->byteOffset();
+    out->byte_length = view->byteLength();
+    out->element_count = view->length();
+    out->kind = *kind;
+    return true;
 }
 
 extern "C" BunEmbedRegisteredClass* BunEmbed__registerClass(

@@ -203,6 +203,19 @@ typedef enum {
     BUN_BIGUINT64_ARRAY = 10,
 } BunTypedArrayKind;
 
+typedef struct {
+    void* data;
+    size_t byte_length;
+} BunArrayBufferInfo;
+
+typedef struct {
+    void* data;
+    size_t byte_offset;
+    size_t byte_length;
+    size_t element_count;
+    BunTypedArrayKind kind;
+} BunTypedArrayInfo;
+
 /// Wrap C memory as a JS ArrayBuffer (zero-copy).
 ///
 /// The JS ArrayBuffer directly references `data` — no copy is made.
@@ -264,6 +277,19 @@ BunValue bun_array_buffer(BunContext* ctx, void* data, size_t len,
 BunValue bun_typed_array(BunContext* ctx, BunTypedArrayKind kind,
     void* data, size_t element_count,
     BunFinalizerFn finalizer, void* userdata);
+
+/// Read the backing pointer and length from an ArrayBuffer.
+///
+/// This performs no coercion. Returns 1 only when `value` is an attached
+/// ArrayBuffer and `out` is non-NULL.
+int bun_get_array_buffer(BunContext* ctx, BunValue value, BunArrayBufferInfo* out);
+
+/// Read the backing pointer and metadata from a TypedArray.
+///
+/// This performs no coercion. Returns 1 only when `value` is an attached
+/// TypedArray (including subclasses such as Buffer) and `out` is non-NULL.
+/// DataView is not accepted.
+int bun_get_typed_array(BunContext* ctx, BunValue value, BunTypedArrayInfo* out);
 
 // --------------------------------------------------------------------------
 // Class API

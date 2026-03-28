@@ -55,6 +55,19 @@ const BunClassDescriptor = extern struct {
     method_count: usize,
 };
 
+const BunArrayBufferInfo = extern struct {
+    data: ?*anyopaque,
+    byte_length: usize,
+};
+
+const BunTypedArrayInfo = extern struct {
+    data: ?*anyopaque,
+    byte_offset: usize,
+    byte_length: usize,
+    element_count: usize,
+    kind: u32,
+};
+
 const HostFnData = struct {
     native_fn: BunHostFn,
     userdata: ?*anyopaque,
@@ -244,6 +257,18 @@ extern fn BunEmbed__createTypedArray(
     finalizer: ?BunFinalizerFn,
     userdata: ?*anyopaque,
 ) JSValue;
+
+extern fn BunEmbed__getArrayBuffer(
+    global: *JSGlobalObject,
+    value: JSValue,
+    out: *BunArrayBufferInfo,
+) bool;
+
+extern fn BunEmbed__getTypedArray(
+    global: *JSGlobalObject,
+    value: JSValue,
+    out: *BunTypedArrayInfo,
+) bool;
 
 extern fn BunEmbed__registerClass(
     global: *JSGlobalObject,
@@ -728,6 +753,39 @@ pub export fn bun_typed_array(
     return if (result == .zero) toBunValue(.js_undefined) else toBunValue(result);
 }
 
+pub export fn bun_get_array_buffer(
+    ctx: ?*BunContext,
+    value: BunValue,
+    out: ?*BunArrayBufferInfo,
+) callconv(.c) c_int {
+    const info = out orelse return 0;
+    info.* = .{
+        .data = null,
+        .byte_length = 0,
+    };
+
+    const global = toGlobal(ctx) orelse return 0;
+    return if (BunEmbed__getArrayBuffer(global, toJSValue(value), info)) 1 else 0;
+}
+
+pub export fn bun_get_typed_array(
+    ctx: ?*BunContext,
+    value: BunValue,
+    out: ?*BunTypedArrayInfo,
+) callconv(.c) c_int {
+    const info = out orelse return 0;
+    info.* = .{
+        .data = null,
+        .byte_offset = 0,
+        .byte_length = 0,
+        .element_count = 0,
+        .kind = 0,
+    };
+
+    const global = toGlobal(ctx) orelse return 0;
+    return if (BunEmbed__getTypedArray(global, toJSValue(value), info)) 1 else 0;
+}
+
 pub export fn bun_class_register(
     ctx: ?*BunContext,
     descriptor: ?*const BunClassDescriptor,
@@ -1147,6 +1205,8 @@ comptime {
     _ = &bun_function;
     _ = &bun_array_buffer;
     _ = &bun_typed_array;
+    _ = &bun_get_array_buffer;
+    _ = &bun_get_typed_array;
     _ = &bun_class_register;
     _ = &bun_class_new;
     _ = &bun_class_unwrap;

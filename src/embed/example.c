@@ -377,6 +377,15 @@ int main(void)
             num_floats, float_buffer_finalize, floats);
         bun_set(ctx, global, "nativeFloats", 12, f32);
 
+        BunTypedArrayInfo typed_info;
+        if (bun_get_typed_array(ctx, f32, &typed_info)) {
+            const float* host_floats = (const float*)typed_info.data;
+            printf("Host typed array: kind=%u length=%zu first=%g\n",
+                (unsigned)typed_info.kind,
+                typed_info.element_count,
+                host_floats ? host_floats[0] : 0.0f);
+        }
+
         r = bun_eval_string(rt,
             "const a = nativeFloats;"
             "console.log('Float32Array length:', a.length);"
@@ -389,6 +398,14 @@ int main(void)
     static const uint8_t magic[4] = { 0xDE, 0xAD, 0xBE, 0xEF };
     BunValue ab = bun_array_buffer(ctx, (void*)(uintptr_t)magic, sizeof(magic), NULL, NULL);
     bun_set(ctx, global, "nativeBuf", 9, ab);
+
+    BunArrayBufferInfo buffer_info;
+    if (bun_get_array_buffer(ctx, ab, &buffer_info)) {
+        const uint8_t* bytes = (const uint8_t*)buffer_info.data;
+        printf("Host array buffer: length=%zu first=0x%02X\n",
+            buffer_info.byte_length,
+            bytes ? (unsigned)bytes[0] : 0);
+    }
 
     r = bun_eval_string(rt,
         "const v = new DataView(nativeBuf);"
