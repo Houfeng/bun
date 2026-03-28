@@ -15,6 +15,149 @@ typedef struct {
     int value;
 } Counter;
 
+typedef struct {
+    int x;
+    int y;
+} NativeView;
+
+typedef struct {
+    NativeView view;
+    char text[64];
+} NativeText;
+
+static BunValue view_get_x(BunContext* ctx, BunValue this_value, void* native_ptr, void* userdata)
+{
+    (void)ctx;
+    (void)this_value;
+    (void)userdata;
+    NativeView* view = (NativeView*)native_ptr;
+    return view ? bun_int32(view->x) : BUN_UNDEFINED;
+}
+
+static void view_set_x(BunContext* ctx, BunValue this_value, void* native_ptr, BunValue value, void* userdata)
+{
+    (void)ctx;
+    (void)this_value;
+    (void)userdata;
+    NativeView* view = (NativeView*)native_ptr;
+    if (!view) return;
+    view->x = bun_to_int32(value);
+}
+
+static BunValue view_get_y(BunContext* ctx, BunValue this_value, void* native_ptr, void* userdata)
+{
+    (void)ctx;
+    (void)this_value;
+    (void)userdata;
+    NativeView* view = (NativeView*)native_ptr;
+    return view ? bun_int32(view->y) : BUN_UNDEFINED;
+}
+
+static void view_set_y(BunContext* ctx, BunValue this_value, void* native_ptr, BunValue value, void* userdata)
+{
+    (void)ctx;
+    (void)this_value;
+    (void)userdata;
+    NativeView* view = (NativeView*)native_ptr;
+    if (!view) return;
+    view->y = bun_to_int32(value);
+}
+
+static BunValue view_move_by(BunContext* ctx, BunValue this_value, void* native_ptr, int argc, const BunValue* argv, void* userdata)
+{
+    (void)this_value;
+    (void)userdata;
+    NativeView* view = (NativeView*)native_ptr;
+    if (!view) return BUN_UNDEFINED;
+
+    if (argc >= 1 && argv) view->x += bun_to_int32(argv[0]);
+    if (argc >= 2 && argv) view->y += bun_to_int32(argv[1]);
+
+    BunValue result = bun_object(ctx);
+    bun_set(ctx, result, "x", 1, bun_int32(view->x));
+    bun_set(ctx, result, "y", 1, bun_int32(view->y));
+    return result;
+}
+
+static BunValue text_get_content(BunContext* ctx, BunValue this_value, void* native_ptr, void* userdata)
+{
+    (void)this_value;
+    (void)userdata;
+    NativeText* text = (NativeText*)native_ptr;
+    if (!text) return BUN_UNDEFINED;
+    return bun_string(ctx, text->text, strlen(text->text));
+}
+
+static void text_set_content(BunContext* ctx, BunValue this_value, void* native_ptr, BunValue value, void* userdata)
+{
+    (void)this_value;
+    (void)userdata;
+    NativeText* text = (NativeText*)native_ptr;
+    if (!text) return;
+
+    size_t len = 0;
+    char* utf8 = bun_to_utf8(ctx, value, &len);
+    if (!utf8) return;
+
+    if (len >= sizeof(text->text)) len = sizeof(text->text) - 1;
+    memcpy(text->text, utf8, len);
+    text->text[len] = '\0';
+    free(utf8);
+}
+
+static BunValue text_measure(BunContext* ctx, BunValue this_value, void* native_ptr, int argc, const BunValue* argv, void* userdata)
+{
+    (void)ctx;
+    (void)this_value;
+    (void)argc;
+    (void)argv;
+    (void)userdata;
+    NativeText* text = (NativeText*)native_ptr;
+    return text ? bun_int32((int32_t)strlen(text->text)) : BUN_UNDEFINED;
+}
+
+static void native_view_finalize(void* native_ptr, void* userdata)
+{
+    const char* class_name = (const char*)userdata;
+    printf("  [class finalizer] freeing %s at %p\n", class_name ? class_name : "instance", native_ptr);
+    free(native_ptr);
+}
+
+static const BunClassPropertyDescriptor VIEW_PROPERTIES[] = {
+    { "x", 1, view_get_x, view_set_x, NULL, 0, 0, 0 },
+    { "y", 1, view_get_y, view_set_y, NULL, 0, 0, 0 },
+};
+
+static const BunClassMethodDescriptor VIEW_METHODS[] = {
+    { "moveBy", 6, view_move_by, NULL, 2, 0, 0 },
+};
+
+static const BunClassDescriptor VIEW_CLASS = {
+    "View",
+    4,
+    VIEW_PROPERTIES,
+    sizeof(VIEW_PROPERTIES) / sizeof(VIEW_PROPERTIES[0]),
+    VIEW_METHODS,
+    sizeof(VIEW_METHODS) / sizeof(VIEW_METHODS[0]),
+};
+
+static const BunClassPropertyDescriptor TEXT_PROPERTIES[] = {
+    { "text", 4, text_get_content, text_set_content, NULL, 0, 0, 0 },
+};
+
+static const BunClassMethodDescriptor TEXT_METHODS[] = {
+    { "measure", 7, text_measure, NULL, 0, 0, 0 },
+};
+
+static const BunClassDescriptor TEXT_CLASS = {
+    "Text",
+    4,
+    TEXT_PROPERTIES,
+    sizeof(TEXT_PROPERTIES) / sizeof(TEXT_PROPERTIES[0]),
+    TEXT_METHODS,
+    sizeof(TEXT_METHODS) / sizeof(TEXT_METHODS[0]),
+};
+
 static void counter_finalize(void* userdata)
 {
     Counter* counter = (Counter*)userdata;
@@ -133,6 +276,39 @@ int main(void)
     bun_define_accessor(ctx, counter_obj, "value", 5, counter_get, counter_set, 0, 0, 0);
     bun_set(ctx, global, "counter", 7, counter_obj);
 
+    BunClass* view_class = bun_class_register(ctx, &VIEW_CLASS, NULL);
+    BunClass* text_class = bun_class_register(ctx, &TEXT_CLASS, view_class);
+    if (!view_class || !text_class) {
+        fprintf(stderr, "Failed to register BunClass descriptors\n");
+        bun_destroy(rt);
+        return 1;
+    }
+
+    NativeText* label = calloc(1, sizeof(*label));
+    if (!label) {
+        fprintf(stderr, "Failed to allocate label\n");
+        bun_destroy(rt);
+        return 1;
+    }
+    label->view.x = 12;
+    label->view.y = 18;
+    strcpy(label->text, "embed label");
+
+    BunValue label_obj = bun_class_new(ctx, text_class, label, native_view_finalize, "Text");
+    BunValue view_proto = bun_class_prototype(ctx, view_class);
+    BunValue text_proto = bun_class_prototype(ctx, text_class);
+    bun_set(ctx, global, "label", 5, label_obj);
+    bun_set(ctx, global, "ViewProto", 9, view_proto);
+    bun_set(ctx, global, "TextProto", 9, text_proto);
+
+    printf("class instance? %d\n", bun_is_class_instance(ctx, label_obj));
+    printf("instanceof View? %d\n", bun_instanceof_class(ctx, label_obj, view_class));
+    printf("instanceof Text? %d\n", bun_instanceof_class(ctx, label_obj, text_class));
+
+    NativeView* unwrapped_view = (NativeView*)bun_class_unwrap(ctx, label_obj, view_class);
+    NativeText* unwrapped_text = (NativeText*)bun_class_unwrap(ctx, label_obj, text_class);
+    printf("unwrap(view)=%p unwrap(text)=%p\n", (void*)unwrapped_view, (void*)unwrapped_text);
+
     printf("\n--- Evaluating JS ---\n");
     BunEvalResult r;
 
@@ -150,6 +326,15 @@ int main(void)
         "counter.value = 42;"
         "console.log('counter.inc() =', counter.inc());"
         "console.log('counter.value =', counter.value);");
+    if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
+
+    r = bun_eval_string(rt,
+        "console.log('label.text =', label.text);"
+        "console.log('label.measure() =', label.measure());"
+        "console.log('moveBy ->', label.moveBy(3, 4));"
+        "console.log('label.x,label.y =', label.x, label.y);"
+        "console.log('text proto === Object.getPrototypeOf(label):', TextProto === Object.getPrototypeOf(label));"
+        "console.log('view proto === Object.getPrototypeOf(TextProto):', ViewProto === Object.getPrototypeOf(TextProto));");
     if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
 
     // Demonstrate bun_call with error detection.
@@ -222,6 +407,8 @@ int main(void)
     }
 
     printf("\nDestroying Bun runtime...\n");
+    printf("manual dispose(label) -> %d\n", bun_class_dispose(ctx, label_obj));
+    printf("dispose(label) again -> %d\n", bun_class_dispose(ctx, label_obj));
     bun_destroy(rt);
 
     printf("Done.\n");

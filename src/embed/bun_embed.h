@@ -29,6 +29,9 @@ typedef struct BunRuntime BunRuntime;
 /// Opaque execution context (backed by JSGlobalObject* internally).
 typedef struct BunContext BunContext;
 
+/// Opaque runtime-local class handle returned by bun_class_register().
+typedef struct BunClass BunClass;
+
 /// Encoded JavaScript value (NaN-boxed JSValue).
 typedef uint64_t BunValue;
 
@@ -56,6 +59,53 @@ typedef void (*BunSetterFn)(BunContext* ctx, BunValue this_value, BunValue value
 /// This runs during GC finalization. It must not call back into Bun/JS APIs.
 /// Use it only to release native resources associated with the object.
 typedef void (*BunFinalizerFn)(void* userdata);
+
+/// Native instance method callback for bun_class_register().
+typedef BunValue (*BunClassMethodFn)(BunContext* ctx, BunValue this_value, void* native_ptr,
+    int argc, const BunValue* argv, void* userdata);
+
+/// Native property getter callback for bun_class_register().
+typedef BunValue (*BunClassGetterFn)(BunContext* ctx, BunValue this_value, void* native_ptr, void* userdata);
+
+/// Native property setter callback for bun_class_register().
+typedef void (*BunClassSetterFn)(BunContext* ctx, BunValue this_value, void* native_ptr,
+    BunValue value, void* userdata);
+
+/// Finalizer callback for bun_class_new().
+///
+/// Runs at most once, either when bun_class_dispose() is called or when the JS
+/// object is eventually GC'd. It must not call back into Bun/JS APIs.
+typedef void (*BunClassFinalizerFn)(void* native_ptr, void* userdata);
+
+typedef struct {
+    const char* name;
+    size_t name_len;
+    BunClassMethodFn callback;
+    void* userdata;
+    int arg_count;
+    int dont_enum;
+    int dont_delete;
+} BunClassMethodDescriptor;
+
+typedef struct {
+    const char* name;
+    size_t name_len;
+    BunClassGetterFn getter;
+    BunClassSetterFn setter;
+    void* userdata;
+    int read_only;
+    int dont_enum;
+    int dont_delete;
+} BunClassPropertyDescriptor;
+
+typedef struct {
+    const char* name;
+    size_t name_len;
+    const BunClassPropertyDescriptor* properties;
+    size_t property_count;
+    const BunClassMethodDescriptor* methods;
+    size_t method_count;
+} BunClassDescriptor;
 
 /// Predefined immediate values in JSValue64 mode.
 #define BUN_UNDEFINED ((BunValue)0xAULL)
@@ -214,6 +264,43 @@ BunValue bun_array_buffer(BunContext* ctx, void* data, size_t len,
 BunValue bun_typed_array(BunContext* ctx, BunTypedArrayKind kind,
     void* data, size_t element_count,
     BunFinalizerFn finalizer, void* userdata);
+
+// --------------------------------------------------------------------------
+// Class API
+// --------------------------------------------------------------------------
+
+/// Register a host-defined class for this runtime.
+///
+/// The returned BunClass* is only valid for the current runtime. Pass a parent
+/// returned by a prior bun_class_register() call on the same runtime to build a
+/// prototype chain.
+BunClass* bun_class_register(BunContext* ctx, const BunClassDescriptor* descriptor, BunClass* parent);
+
+/// Create an instance of a registered BunClass.
+///
+/// The returned object is a normal BunValue object and can be used with the
+/// existing generic APIs (bun_get, bun_set, bun_call, bun_protect, ...).
+BunValue bun_class_new(BunContext* ctx, BunClass* klass, void* native_ptr,
+    BunClassFinalizerFn finalizer, void* userdata);
+
+/// Return the native pointer for a class instance, or NULL on mismatch.
+///
+/// `klass` may be any ancestor class handle returned by bun_class_register().
+void* bun_class_unwrap(BunContext* ctx, BunValue value, BunClass* klass);
+
+/// Return 1 when value is any BunClass instance, else 0.
+int bun_is_class_instance(BunContext* ctx, BunValue value);
+
+/// Return 1 when value is an instance of `klass` or one of its subclasses.
+int bun_instanceof_class(BunContext* ctx, BunValue value, BunClass* klass);
+
+/// Dispose an instance early and run its finalizer immediately if needed.
+///
+/// The finalizer runs at most once. Repeated calls return 0 after the first.
+int bun_class_dispose(BunContext* ctx, BunValue value);
+
+/// Return the runtime-local prototype object for a registered class.
+BunValue bun_class_prototype(BunContext* ctx, BunClass* klass);
 
 // --------------------------------------------------------------------------
 // Value Introspection & Conversion

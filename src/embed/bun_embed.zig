@@ -14,11 +14,46 @@ const api = bun.schema.api;
 
 const BunValue = u64;
 const BunContext = opaque {};
+const BunClass = opaque {};
 
 const BunHostFn = *const fn (?*BunContext, c_int, ?[*]const BunValue, ?*anyopaque) callconv(.c) BunValue;
 const BunGetterFn = *const fn (?*BunContext, BunValue) callconv(.c) BunValue;
 const BunSetterFn = *const fn (?*BunContext, BunValue, BunValue) callconv(.c) void;
 const BunFinalizerFn = *const fn (?*anyopaque) callconv(.c) void;
+const BunClassMethodFn = *const fn (?*BunContext, BunValue, ?*anyopaque, c_int, ?[*]const BunValue, ?*anyopaque) callconv(.c) BunValue;
+const BunClassGetterFn = *const fn (?*BunContext, BunValue, ?*anyopaque, ?*anyopaque) callconv(.c) BunValue;
+const BunClassSetterFn = *const fn (?*BunContext, BunValue, ?*anyopaque, BunValue, ?*anyopaque) callconv(.c) void;
+const BunClassFinalizerFn = *const fn (?*anyopaque, ?*anyopaque) callconv(.c) void;
+
+const BunClassMethodDescriptor = extern struct {
+    name: ?[*]const u8,
+    name_len: usize,
+    callback: ?BunClassMethodFn,
+    userdata: ?*anyopaque,
+    arg_count: c_int,
+    dont_enum: c_int,
+    dont_delete: c_int,
+};
+
+const BunClassPropertyDescriptor = extern struct {
+    name: ?[*]const u8,
+    name_len: usize,
+    getter: ?BunClassGetterFn,
+    setter: ?BunClassSetterFn,
+    userdata: ?*anyopaque,
+    read_only: c_int,
+    dont_enum: c_int,
+    dont_delete: c_int,
+};
+
+const BunClassDescriptor = extern struct {
+    name: ?[*]const u8,
+    name_len: usize,
+    properties: ?[*]const BunClassPropertyDescriptor,
+    property_count: usize,
+    methods: ?[*]const BunClassMethodDescriptor,
+    method_count: usize,
+};
 
 const HostFnData = struct {
     native_fn: BunHostFn,
@@ -56,6 +91,8 @@ const BunRuntime = struct {
     /// Per-runtime side-table for opaque pointers and finalizer-dedup guards.
     /// Keyed by JSValue identity; replaces the old string-property approach.
     opaque_map: OpaqueMap = .{},
+    /// Runtime-local class handles allocated by BunEmbed.cpp.
+    class_registry: std.ArrayListUnmanaged(*BunClass) = .{},
 
     fn captureException(runtime: *BunRuntime, global: *JSGlobalObject, value: JSValue) BunEvalResult {
         // Try to get a string representation via toString()
@@ -105,6 +142,13 @@ const BunRuntime = struct {
 
     fn freeOpaqueMap(runtime: *BunRuntime) void {
         runtime.opaque_map.deinit(bun.default_allocator);
+    }
+
+    fn freeClassRegistry(runtime: *BunRuntime) void {
+        for (runtime.class_registry.items) |class_handle| {
+            BunEmbed__destroyClass(class_handle);
+        }
+        runtime.class_registry.deinit(bun.default_allocator);
     }
 };
 
@@ -201,6 +245,49 @@ extern fn BunEmbed__createTypedArray(
     userdata: ?*anyopaque,
 ) JSValue;
 
+extern fn BunEmbed__registerClass(
+    global: *JSGlobalObject,
+    descriptor: *const BunClassDescriptor,
+    parent: ?*BunClass,
+) ?*BunClass;
+
+extern fn BunEmbed__destroyClass(class_handle: *BunClass) void;
+
+extern fn BunEmbed__createClassInstance(
+    global: *JSGlobalObject,
+    class_handle: *BunClass,
+    native_ptr: ?*anyopaque,
+    finalizer: ?BunClassFinalizerFn,
+    userdata: ?*anyopaque,
+) JSValue;
+
+extern fn BunEmbed__unwrapClassInstance(
+    global: *JSGlobalObject,
+    value: JSValue,
+    class_handle: ?*BunClass,
+) ?*anyopaque;
+
+extern fn BunEmbed__isClassInstance(
+    global: *JSGlobalObject,
+    value: JSValue,
+) bool;
+
+extern fn BunEmbed__instanceofClass(
+    global: *JSGlobalObject,
+    value: JSValue,
+    class_handle: *BunClass,
+) bool;
+
+extern fn BunEmbed__disposeClassInstance(
+    global: *JSGlobalObject,
+    value: JSValue,
+) bool;
+
+extern fn BunEmbed__classPrototype(
+    global: *JSGlobalObject,
+    class_handle: *BunClass,
+) JSValue;
+
 const BUN_ACCESSOR_READ_ONLY: u32 = 1 << 0;
 const BUN_ACCESSOR_DONT_ENUM: u32 = 1 << 1;
 const BUN_ACCESSOR_DONT_DELETE: u32 = 1 << 2;
@@ -292,6 +379,7 @@ pub export fn bun_destroy(rt: ?*BunRuntime) callconv(.c) void {
     runtime.freePendingCalls();
     runtime.freeHostFnRegistry();
     runtime.freeOpaqueMap();
+    runtime.freeClassRegistry();
 
     runtime.vm.onExit();
     bun.default_allocator.destroy(runtime);
@@ -637,6 +725,72 @@ pub export fn bun_typed_array(
 ) callconv(.c) BunValue {
     const global = toGlobal(ctx) orelse return toBunValue(.js_undefined);
     const result = BunEmbed__createTypedArray(global, kind, data, element_count, finalizer, userdata);
+    return if (result == .zero) toBunValue(.js_undefined) else toBunValue(result);
+}
+
+pub export fn bun_class_register(
+    ctx: ?*BunContext,
+    descriptor: ?*const BunClassDescriptor,
+    parent: ?*BunClass,
+) callconv(.c) ?*BunClass {
+    const global = toGlobal(ctx) orelse return null;
+    const class_descriptor = descriptor orelse return null;
+    const runtime = vmToRuntime(global.bunVM()) orelse return null;
+
+    const class_handle = BunEmbed__registerClass(global, class_descriptor, parent) orelse return null;
+    runtime.class_registry.append(bun.default_allocator, class_handle) catch {
+        BunEmbed__destroyClass(class_handle);
+        return null;
+    };
+    return class_handle;
+}
+
+pub export fn bun_class_new(
+    ctx: ?*BunContext,
+    class_handle: ?*BunClass,
+    native_ptr: ?*anyopaque,
+    finalizer: ?BunClassFinalizerFn,
+    userdata: ?*anyopaque,
+) callconv(.c) BunValue {
+    const global = toGlobal(ctx) orelse return toBunValue(.js_undefined);
+    const klass = class_handle orelse return toBunValue(.js_undefined);
+    const result = BunEmbed__createClassInstance(global, klass, native_ptr, finalizer, userdata);
+    return if (result == .zero) toBunValue(.js_undefined) else toBunValue(result);
+}
+
+pub export fn bun_class_unwrap(
+    ctx: ?*BunContext,
+    value: BunValue,
+    class_handle: ?*BunClass,
+) callconv(.c) ?*anyopaque {
+    const global = toGlobal(ctx) orelse return null;
+    return BunEmbed__unwrapClassInstance(global, toJSValue(value), class_handle);
+}
+
+pub export fn bun_is_class_instance(ctx: ?*BunContext, value: BunValue) callconv(.c) c_int {
+    const global = toGlobal(ctx) orelse return 0;
+    return if (BunEmbed__isClassInstance(global, toJSValue(value))) 1 else 0;
+}
+
+pub export fn bun_instanceof_class(
+    ctx: ?*BunContext,
+    value: BunValue,
+    class_handle: ?*BunClass,
+) callconv(.c) c_int {
+    const global = toGlobal(ctx) orelse return 0;
+    const klass = class_handle orelse return 0;
+    return if (BunEmbed__instanceofClass(global, toJSValue(value), klass)) 1 else 0;
+}
+
+pub export fn bun_class_dispose(ctx: ?*BunContext, value: BunValue) callconv(.c) c_int {
+    const global = toGlobal(ctx) orelse return 0;
+    return if (BunEmbed__disposeClassInstance(global, toJSValue(value))) 1 else 0;
+}
+
+pub export fn bun_class_prototype(ctx: ?*BunContext, class_handle: ?*BunClass) callconv(.c) BunValue {
+    const global = toGlobal(ctx) orelse return toBunValue(.js_undefined);
+    const klass = class_handle orelse return toBunValue(.js_undefined);
+    const result = BunEmbed__classPrototype(global, klass);
     return if (result == .zero) toBunValue(.js_undefined) else toBunValue(result);
 }
 
@@ -993,6 +1147,13 @@ comptime {
     _ = &bun_function;
     _ = &bun_array_buffer;
     _ = &bun_typed_array;
+    _ = &bun_class_register;
+    _ = &bun_class_new;
+    _ = &bun_class_unwrap;
+    _ = &bun_is_class_instance;
+    _ = &bun_instanceof_class;
+    _ = &bun_class_dispose;
+    _ = &bun_class_prototype;
     _ = &bun_is_undefined;
     _ = &bun_is_null;
     _ = &bun_is_bool;

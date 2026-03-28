@@ -4,15 +4,20 @@
 #include "JavaScriptCore/CustomGetterSetter.h"
 #include "JavaScriptCore/Identifier.h"
 #include "JavaScriptCore/JSObject.h"
+#include "JavaScriptCore/JSFunction.h"
+#include "JavaScriptCore/ObjectConstructor.h"
 #include "JavaScriptCore/JSArrayBuffer.h"
 #include "JavaScriptCore/JSArrayBufferView.h"
 #include "JavaScriptCore/JSGenericTypedArrayView.h"
 #include "JavaScriptCore/TypedArrayAdaptors.h"
 
+#include <cstring>
+#include <memory>
 #include <span>
 #include <string>
 #include <unordered_map>
 #include <mutex>
+#include <vector>
 
 namespace Bun {
 using namespace JSC;
@@ -20,6 +25,306 @@ using namespace JSC;
 using BunEmbedGetterFn = uint64_t (*)(void* ctx, uint64_t this_value);
 using BunEmbedSetterFn = void (*)(void* ctx, uint64_t this_value, uint64_t value);
 using BunEmbedFinalizerFn = void (*)(void* userdata);
+using BunEmbedClassMethodFn = uint64_t (*)(void* ctx, uint64_t this_value, void* native_ptr, int argc, const uint64_t* argv, void* userdata);
+using BunEmbedClassGetterFn = uint64_t (*)(void* ctx, uint64_t this_value, void* native_ptr, void* userdata);
+using BunEmbedClassSetterFn = void (*)(void* ctx, uint64_t this_value, void* native_ptr, uint64_t value, void* userdata);
+using BunEmbedClassFinalizerFn = void (*)(void* native_ptr, void* userdata);
+
+struct BunEmbedClassMethodDescriptor {
+    const char* name;
+    size_t name_len;
+    BunEmbedClassMethodFn callback;
+    void* userdata;
+    int arg_count;
+    int dont_enum;
+    int dont_delete;
+};
+
+struct BunEmbedClassPropertyDescriptor {
+    const char* name;
+    size_t name_len;
+    BunEmbedClassGetterFn getter;
+    BunEmbedClassSetterFn setter;
+    void* userdata;
+    int read_only;
+    int dont_enum;
+    int dont_delete;
+};
+
+struct BunEmbedClassDescriptor {
+    const char* name;
+    size_t name_len;
+    const BunEmbedClassPropertyDescriptor* properties;
+    size_t property_count;
+    const BunEmbedClassMethodDescriptor* methods;
+    size_t method_count;
+};
+
+struct BunEmbedRegisteredClass;
+
+struct BunEmbedRegisteredMethod {
+    std::string name;
+    BunEmbedClassMethodFn callback { nullptr };
+    void* userdata { nullptr };
+    unsigned argCount { 0 };
+    unsigned attributes { 0 };
+    JSObject* functionObject { nullptr };
+};
+
+struct BunEmbedRegisteredProperty {
+    std::string name;
+    BunEmbedClassGetterFn getter { nullptr };
+    BunEmbedClassSetterFn setter { nullptr };
+    void* userdata { nullptr };
+    unsigned attributes { 0 };
+};
+
+struct BunEmbedRegisteredClass {
+    VM* vm { nullptr };
+    std::string name;
+    BunEmbedRegisteredClass* parent { nullptr };
+    JSObject* prototype { nullptr };
+    Structure* instanceStructure { nullptr };
+    std::vector<BunEmbedRegisteredMethod> methods;
+    std::vector<BunEmbedRegisteredProperty> properties;
+};
+
+static std::unordered_map<JSObject*, BunEmbedRegisteredMethod*> s_class_method_map;
+
+static bool stringEqualsPropertyName(const std::string& name, PropertyName propertyName)
+{
+    ZigString zig_name = Zig::toZigString(propertyName.publicName());
+    if (zig_name.len != name.size())
+        return false;
+
+    if (zig_name.len == 0)
+        return true;
+
+    return std::memcmp(name.data(), zig_name.ptr, zig_name.len) == 0;
+}
+
+class JSBunClassInstance final : public JSDestructibleObject {
+public:
+    using Base = JSDestructibleObject;
+    static constexpr unsigned StructureFlags = Base::StructureFlags;
+
+    static JSBunClassInstance* create(
+        VM& vm,
+        Structure* structure,
+        BunEmbedRegisteredClass* registeredClass,
+        void* nativePtr,
+        BunEmbedClassFinalizerFn finalizer,
+        void* userdata)
+    {
+        auto* instance = new (NotNull, allocateCell<JSBunClassInstance>(vm)) JSBunClassInstance(vm, structure, registeredClass, nativePtr, finalizer, userdata);
+        instance->finishCreation(vm);
+        return instance;
+    }
+
+    static Structure* createStructure(VM& vm, JSGlobalObject* globalObject, JSObject* prototype)
+    {
+        return Structure::create(vm, globalObject, prototype, TypeInfo(ObjectType, StructureFlags), info());
+    }
+
+    static void destroy(JSCell* cell)
+    {
+        static_cast<JSBunClassInstance*>(cell)->~JSBunClassInstance();
+    }
+
+    template<typename, JSC::SubspaceAccess mode>
+    static GCClient::IsoSubspace* subspaceFor(VM& vm)
+    {
+        if constexpr (mode == SubspaceAccess::Concurrently)
+            return nullptr;
+        return &vm.plainObjectSpace();
+    }
+
+    DECLARE_INFO;
+    DECLARE_VISIT_CHILDREN;
+
+    BunEmbedRegisteredClass* registeredClass() const { return m_registeredClass; }
+    void* nativePtr() const { return m_nativePtr; }
+    bool isDisposed() const { return m_disposed; }
+
+    bool isInstanceOf(const BunEmbedRegisteredClass* expected) const
+    {
+        for (auto* current = m_registeredClass; current; current = current->parent) {
+            if (current == expected)
+                return true;
+        }
+        return false;
+    }
+
+    bool dispose()
+    {
+        if (m_disposed)
+            return false;
+
+        m_disposed = true;
+        void* nativePtr = m_nativePtr;
+        void* userdata = m_userdata;
+        auto finalizer = m_finalizer;
+
+        m_nativePtr = nullptr;
+        m_userdata = nullptr;
+        m_finalizer = nullptr;
+
+        if (finalizer)
+            finalizer(nativePtr, userdata);
+
+        return true;
+    }
+
+private:
+    JSBunClassInstance(
+        VM& vm,
+        Structure* structure,
+        BunEmbedRegisteredClass* registeredClass,
+        void* nativePtr,
+        BunEmbedClassFinalizerFn finalizer,
+        void* userdata)
+        : Base(vm, structure)
+        , m_registeredClass(registeredClass)
+        , m_nativePtr(nativePtr)
+        , m_userdata(userdata)
+        , m_finalizer(finalizer)
+    {
+    }
+
+    ~JSBunClassInstance()
+    {
+        dispose();
+    }
+
+    void finishCreation(VM& vm)
+    {
+        Base::finishCreation(vm);
+    }
+
+    BunEmbedRegisteredClass* m_registeredClass { nullptr };
+    void* m_nativePtr { nullptr };
+    void* m_userdata { nullptr };
+    BunEmbedClassFinalizerFn m_finalizer { nullptr };
+    bool m_disposed { false };
+};
+
+const ClassInfo JSBunClassInstance::s_info = { "BunEmbedClassInstance"_s, &Base::s_info, nullptr, nullptr, CREATE_METHOD_TABLE(JSBunClassInstance) };
+
+template<typename Visitor>
+void JSBunClassInstance::visitChildrenImpl(JSCell* cell, Visitor& visitor)
+{
+    auto* thisObject = jsCast<JSBunClassInstance*>(cell);
+    ASSERT_GC_OBJECT_INHERITS(thisObject, info());
+    Base::visitChildren(thisObject, visitor);
+}
+
+DEFINE_VISIT_CHILDREN(JSBunClassInstance);
+
+static unsigned propertyAttributes(int readOnly, int dontEnum, int dontDelete)
+{
+    unsigned attributes = 0;
+    if (readOnly)
+        attributes |= PropertyAttribute::ReadOnly;
+    if (dontEnum)
+        attributes |= PropertyAttribute::DontEnum;
+    if (dontDelete)
+        attributes |= PropertyAttribute::DontDelete;
+    return attributes;
+}
+
+static BunEmbedRegisteredProperty* findProperty(JSBunClassInstance* instance, PropertyName propertyName)
+{
+    for (auto* current = instance->registeredClass(); current; current = current->parent) {
+        for (auto& property : current->properties) {
+            if (stringEqualsPropertyName(property.name, propertyName))
+                return &property;
+        }
+    }
+
+    return nullptr;
+}
+
+JSC_DEFINE_CUSTOM_GETTER(BunEmbed_classGetter, (JSGlobalObject * globalObject, EncodedJSValue thisValue, PropertyName propertyName))
+{
+    auto* instance = jsDynamicCast<JSBunClassInstance*>(JSValue::decode(thisValue));
+    if (!instance || instance->isDisposed())
+        return JSValue::encode(jsUndefined());
+
+    auto* property = findProperty(instance, propertyName);
+    if (!property || !property->getter)
+        return JSValue::encode(jsUndefined());
+
+    return static_cast<EncodedJSValue>(property->getter(static_cast<void*>(globalObject), static_cast<uint64_t>(thisValue), instance->nativePtr(), property->userdata));
+}
+
+JSC_DEFINE_CUSTOM_SETTER(BunEmbed_classSetter, (JSGlobalObject * globalObject, EncodedJSValue thisValue, EncodedJSValue value, PropertyName propertyName))
+{
+    auto* instance = jsDynamicCast<JSBunClassInstance*>(JSValue::decode(thisValue));
+    if (!instance || instance->isDisposed())
+        return false;
+
+    auto* property = findProperty(instance, propertyName);
+    if (!property || !property->setter || (property->attributes & PropertyAttribute::ReadOnly))
+        return false;
+
+    property->setter(static_cast<void*>(globalObject), static_cast<uint64_t>(thisValue), instance->nativePtr(), static_cast<uint64_t>(value), property->userdata);
+    return true;
+}
+
+JSC_DEFINE_HOST_FUNCTION(BunEmbed_classMethodDispatcher, (JSGlobalObject * globalObject, CallFrame* callFrame))
+{
+    auto* callee = jsDynamicCast<JSObject*>(callFrame->jsCallee());
+    if (!callee)
+        return JSValue::encode(jsUndefined());
+
+    auto methodIt = s_class_method_map.find(callee);
+    if (methodIt == s_class_method_map.end() || !methodIt->second || !methodIt->second->callback)
+        return JSValue::encode(jsUndefined());
+
+    auto* instance = jsDynamicCast<JSBunClassInstance*>(callFrame->thisValue());
+    if (!instance || instance->isDisposed())
+        return JSValue::encode(jsUndefined());
+
+    const BunEmbedRegisteredMethod* method = methodIt->second;
+    const size_t argCount = callFrame->argumentCount();
+    WTF::Vector<uint64_t, 8> encodedArgs(argCount);
+    for (size_t i = 0; i < argCount; ++i) {
+        encodedArgs[i] = static_cast<uint64_t>(JSValue::encode(callFrame->uncheckedArgument(i)));
+    }
+
+    return static_cast<EncodedJSValue>(method->callback(
+        static_cast<void*>(globalObject),
+        static_cast<uint64_t>(JSValue::encode(callFrame->thisValue())),
+        instance->nativePtr(),
+        static_cast<int>(argCount),
+        argCount == 0 ? nullptr : encodedArgs.mutableSpan().data(),
+        method->userdata));
+}
+
+static void destroyRegisteredClass(BunEmbedRegisteredClass* registeredClass)
+{
+    if (!registeredClass)
+        return;
+
+    JSLockHolder lock(*registeredClass->vm);
+
+    for (auto& method : registeredClass->methods) {
+        if (method.functionObject)
+            s_class_method_map.erase(method.functionObject);
+    }
+
+    if (registeredClass->instanceStructure)
+        gcUnprotect(registeredClass->instanceStructure);
+    if (registeredClass->prototype)
+        gcUnprotect(registeredClass->prototype);
+
+    delete registeredClass;
+}
+
+static bool isVMCompatible(JSGlobalObject* globalObject, BunEmbedRegisteredClass* registeredClass)
+{
+    return registeredClass && registeredClass->vm == &globalObject->vm();
+}
 
 struct AccessorKey {
     uintptr_t object_ptr;
@@ -340,6 +645,175 @@ extern "C" JSC::EncodedJSValue BunEmbed__createTypedArray(
         return {};
 
     return JSValue::encode(view);
+}
+
+extern "C" BunEmbedRegisteredClass* BunEmbed__registerClass(
+    JSGlobalObject* globalObject,
+    const BunEmbedClassDescriptor* descriptor,
+    BunEmbedRegisteredClass* parent)
+{
+    if (!globalObject || !descriptor || !descriptor->name || descriptor->name_len == 0)
+        return nullptr;
+    if (descriptor->property_count > 0 && !descriptor->properties)
+        return nullptr;
+    if (descriptor->method_count > 0 && !descriptor->methods)
+        return nullptr;
+    if (parent && !isVMCompatible(globalObject, parent))
+        return nullptr;
+
+    VM& vm = globalObject->vm();
+
+    auto registeredClass = std::make_unique<BunEmbedRegisteredClass>();
+    registeredClass->vm = &vm;
+    registeredClass->parent = parent;
+    registeredClass->name.assign(descriptor->name, descriptor->name_len);
+
+    JSObject* parentPrototype = parent ? parent->prototype : globalObject->objectPrototype();
+    JSObject* prototype = JSC::constructEmptyObject(globalObject, parentPrototype);
+    if (!prototype)
+        return nullptr;
+
+    registeredClass->prototype = prototype;
+    registeredClass->instanceStructure = JSBunClassInstance::createStructure(vm, globalObject, prototype);
+
+    gcProtect(prototype);
+    gcProtect(registeredClass->instanceStructure);
+
+    registeredClass->properties.reserve(descriptor->property_count);
+    for (size_t i = 0; i < descriptor->property_count; ++i) {
+        const auto& property = descriptor->properties[i];
+        if (!property.name || property.name_len == 0 || !property.getter)
+            goto fail;
+
+        WTF::String propertyName = WTF::String::fromUTF8(std::span { property.name, property.name_len });
+        if (propertyName.isNull())
+            goto fail;
+
+        auto& dst = registeredClass->properties.emplace_back();
+        dst.name.assign(property.name, property.name_len);
+        dst.getter = property.getter;
+        dst.setter = property.setter;
+        dst.userdata = property.userdata;
+        dst.attributes = propertyAttributes(property.read_only, property.dont_enum, property.dont_delete);
+
+        auto* accessor = CustomGetterSetter::create(vm, BunEmbed_classGetter, property.setter && !property.read_only ? BunEmbed_classSetter : nullptr);
+        prototype->putDirectCustomAccessor(vm, Identifier::fromString(vm, propertyName), accessor, dst.attributes);
+    }
+
+    registeredClass->methods.reserve(descriptor->method_count);
+    for (size_t i = 0; i < descriptor->method_count; ++i) {
+        const auto& method = descriptor->methods[i];
+        if (!method.name || method.name_len == 0 || !method.callback)
+            goto fail;
+
+        WTF::String methodName = WTF::String::fromUTF8(std::span { method.name, method.name_len });
+        if (methodName.isNull())
+            goto fail;
+
+        auto& dst = registeredClass->methods.emplace_back();
+        dst.name.assign(method.name, method.name_len);
+        dst.callback = method.callback;
+        dst.userdata = method.userdata;
+        dst.argCount = method.arg_count > 0 ? static_cast<unsigned>(method.arg_count) : 0;
+        dst.attributes = propertyAttributes(0, method.dont_enum, method.dont_delete);
+        dst.functionObject = JSFunction::create(vm, globalObject, dst.argCount, methodName, BunEmbed_classMethodDispatcher, ImplementationVisibility::Public);
+        if (!dst.functionObject)
+            goto fail;
+
+        s_class_method_map[dst.functionObject] = &dst;
+        prototype->putDirect(vm, Identifier::fromString(vm, methodName), dst.functionObject, dst.attributes);
+    }
+
+    return registeredClass.release();
+
+fail:
+    destroyRegisteredClass(registeredClass.release());
+    return nullptr;
+}
+
+extern "C" void BunEmbed__destroyClass(BunEmbedRegisteredClass* registeredClass)
+{
+    destroyRegisteredClass(registeredClass);
+}
+
+extern "C" JSC::EncodedJSValue BunEmbed__createClassInstance(
+    JSGlobalObject* globalObject,
+    BunEmbedRegisteredClass* registeredClass,
+    void* nativePtr,
+    BunEmbedClassFinalizerFn finalizer,
+    void* userdata)
+{
+    if (!globalObject || !isVMCompatible(globalObject, registeredClass))
+        return {};
+
+    VM& vm = globalObject->vm();
+    auto* instance = JSBunClassInstance::create(vm, registeredClass->instanceStructure, registeredClass, nativePtr, finalizer, userdata);
+    if (!instance)
+        return {};
+
+    return JSValue::encode(instance);
+}
+
+extern "C" void* BunEmbed__unwrapClassInstance(
+    JSGlobalObject* globalObject,
+    EncodedJSValue value,
+    BunEmbedRegisteredClass* registeredClass)
+{
+    if (!globalObject)
+        return nullptr;
+    if (registeredClass && !isVMCompatible(globalObject, registeredClass))
+        return nullptr;
+
+    auto* instance = jsDynamicCast<JSBunClassInstance*>(JSValue::decode(value));
+    if (!instance || instance->isDisposed())
+        return nullptr;
+    if (registeredClass && !instance->isInstanceOf(registeredClass))
+        return nullptr;
+    return instance->nativePtr();
+}
+
+extern "C" bool BunEmbed__isClassInstance(
+    JSGlobalObject* globalObject,
+    EncodedJSValue value)
+{
+    if (!globalObject)
+        return false;
+    return jsDynamicCast<JSBunClassInstance*>(JSValue::decode(value)) != nullptr;
+}
+
+extern "C" bool BunEmbed__instanceofClass(
+    JSGlobalObject* globalObject,
+    EncodedJSValue value,
+    BunEmbedRegisteredClass* registeredClass)
+{
+    if (!globalObject || !isVMCompatible(globalObject, registeredClass))
+        return false;
+
+    auto* instance = jsDynamicCast<JSBunClassInstance*>(JSValue::decode(value));
+    return instance && instance->isInstanceOf(registeredClass);
+}
+
+extern "C" bool BunEmbed__disposeClassInstance(
+    JSGlobalObject* globalObject,
+    EncodedJSValue value)
+{
+    if (!globalObject)
+        return false;
+
+    auto* instance = jsDynamicCast<JSBunClassInstance*>(JSValue::decode(value));
+    if (!instance)
+        return false;
+
+    return instance->dispose();
+}
+
+extern "C" JSC::EncodedJSValue BunEmbed__classPrototype(
+    JSGlobalObject* globalObject,
+    BunEmbedRegisteredClass* registeredClass)
+{
+    if (!globalObject || !isVMCompatible(globalObject, registeredClass) || !registeredClass->prototype)
+        return {};
+    return JSValue::encode(registeredClass->prototype);
 }
 
 }
