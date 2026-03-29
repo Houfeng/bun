@@ -4,11 +4,14 @@ const std = @import("std");
 const bun = @import("bun");
 const jsc = bun.jsc;
 const js_ast = bun.ast;
+const js_parser = bun.js_parser;
+const js_printer = bun.js_printer;
+const logger = bun.logger;
+const strings = bun.strings;
 const Arena = bun.allocators.MimallocArena;
 const VirtualMachine = jsc.VirtualMachine;
 const JSGlobalObject = jsc.JSGlobalObject;
 const JSValue = jsc.JSValue;
-const JSModuleLoader = jsc.JSModuleLoader;
 const Environment = bun.Environment;
 const api = bun.schema.api;
 
@@ -226,6 +229,14 @@ fn toGlobal(ctx: ?*BunContext) ?*JSGlobalObject {
 }
 
 extern fn BunString__createUTF8ForJS(globalObject: *JSGlobalObject, ptr: [*]const u8, length: usize) JSValue;
+extern fn Bun__REPL__evaluate(
+    globalObject: *JSGlobalObject,
+    sourcePtr: [*]const u8,
+    sourceLen: usize,
+    filenamePtr: [*]const u8,
+    filenameLen: usize,
+    exception: *JSValue,
+) JSValue;
 
 extern fn JSFunction__createFromZig(
     global: *JSGlobalObject,
@@ -483,23 +494,25 @@ const EvalContext = struct {
     result: BunEvalResult,
 
     pub fn run(this: *EvalContext) void {
-        var exception: [1]JSValue = .{.js_undefined};
-        const ret = JSModuleLoader.evaluate(
+        const transformed = transformForEmbedEval(this.global, this.code);
+        defer if (transformed) |code| this.global.allocator().free(code);
+
+        const source = transformed orelse this.code;
+
+        var exception: JSValue = .js_undefined;
+        const ret = Bun__REPL__evaluate(
             this.global,
-            this.code.ptr,
-            this.code.len,
+            source.ptr,
+            source.len,
             "embed:eval",
             "embed:eval".len,
-            "",
-            0,
-            .js_undefined,
             &exception,
         );
 
         var final_result = ret;
 
-        if (exception[0] != .js_undefined and exception[0] != .zero) {
-            this.result = this.runtime.captureException(this.global, exception[0]);
+        if (exception != .js_undefined and exception != .zero) {
+            this.result = this.runtime.captureException(this.global, exception);
             return;
         }
 
@@ -532,6 +545,97 @@ const EvalContext = struct {
         }
     }
 };
+
+fn transformForEmbedEval(global: *JSGlobalObject, code: []const u8) ?[]u8 {
+    const vm = global.bunVM();
+
+    if (code.len == 0 or strings.trim(code, " \t\n\r").len == 0) {
+        return null;
+    }
+
+    const is_object_literal = isLikelyEmbedObjectLiteral(code);
+    const processed_code = if (is_object_literal)
+        std.fmt.allocPrint(global.allocator(), "({s})", .{code}) catch return null
+    else
+        code;
+    defer if (is_object_literal) global.allocator().free(processed_code);
+
+    var arena = Arena.init();
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var opts = js_parser.Parser.Options.init(vm.transpiler.options.jsx, .tsx);
+    opts.repl_mode = true;
+    opts.features.dead_code_elimination = false;
+    opts.features.top_level_await = true;
+
+    if (vm.transpiler.macro_context == null) {
+        vm.transpiler.macro_context = bun.ast.Macro.MacroContext.init(&vm.transpiler);
+    }
+    opts.macro_context = &vm.transpiler.macro_context.?;
+
+    var log = logger.Log.init(arena.backingAllocator());
+    defer log.deinit();
+
+    const source = logger.Source.initPathString("[embed]", processed_code);
+
+    var parser = js_parser.Parser.init(
+        opts,
+        &log,
+        &source,
+        vm.transpiler.options.define,
+        allocator,
+    ) catch return null;
+
+    const parse_result = parser.parse() catch return null;
+    if (parse_result != .ast) return null;
+
+    const ast = parse_result.ast;
+    if (log.errors > 0) return null;
+
+    const buffer_writer = js_printer.BufferWriter.init(global.allocator());
+    var buffer_printer = js_printer.BufferPrinter.init(buffer_writer);
+    defer buffer_printer.ctx.buffer.deinit();
+
+    const symbols_nested = js_ast.Symbol.NestedList.fromBorrowedSliceDangerous(&.{ast.symbols});
+    const symbols_map = js_ast.Symbol.Map.initList(symbols_nested);
+
+    _ = js_printer.printAst(
+        @TypeOf(&buffer_printer),
+        &buffer_printer,
+        ast,
+        symbols_map,
+        &source,
+        true,
+        .{ .mangled_props = null },
+        false,
+    ) catch return null;
+
+    const written = buffer_printer.ctx.getWritten();
+    return global.allocator().dupe(u8, written) catch null;
+}
+
+fn isLikelyEmbedObjectLiteral(code: []const u8) bool {
+    var start: usize = 0;
+    while (start < code.len and (code[start] == ' ' or code[start] == '\t' or code[start] == '\n' or code[start] == '\r')) {
+        start += 1;
+    }
+
+    if (start >= code.len or code[start] != '{') {
+        return false;
+    }
+
+    var end: usize = code.len;
+    while (end > 0 and (code[end - 1] == ' ' or code[end - 1] == '\t' or code[end - 1] == '\n' or code[end - 1] == '\r')) {
+        end -= 1;
+    }
+
+    if (end > 0 and code[end - 1] == ';') {
+        return false;
+    }
+
+    return true;
+}
 
 pub export fn bun_eval_file(ctx: ?*BunContext, path_ptr: ?[*:0]const u8) callconv(.c) BunEvalResult {
     const global = toGlobal(ctx) orelse return .{ .success = 0, .@"error" = "null context" };
