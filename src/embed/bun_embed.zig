@@ -486,11 +486,31 @@ const EvalContext = struct {
             &exception,
         );
 
+        var final_result = ret;
+
         if (exception[0] != .js_undefined and exception[0] != .zero) {
             this.result = this.runtime.captureException(this.global, exception[0]);
+        } else if (ret.asAnyPromise()) |promise| {
+            promise.setHandled(this.global.vm());
+            this.runtime.vm.waitForPromise(promise);
+
+            switch (promise.status()) {
+                .fulfilled => {
+                    final_result = promise.result(this.global.vm());
+                },
+                .rejected => {
+                    const rejection = promise.result(this.global.vm());
+                    this.result = this.runtime.captureException(this.global, rejection);
+                    return;
+                },
+                .pending => {
+                    this.result = .{ .success = 0, .@"error" = "evaluation promise did not settle" };
+                    return;
+                },
+            }
         } else if (this.global.tryTakeException()) |exc| {
             this.result = this.runtime.captureException(this.global, exc);
-        } else if (ret == .zero) {
+        } else if (final_result == .zero) {
             this.result = .{ .success = 0, .@"error" = "evaluation returned null" };
         } else {
             this.result = .{ .success = 1, .@"error" = null };
@@ -534,11 +554,28 @@ const EvalFileContext = struct {
         };
 
         switch (promise.status()) {
+            .pending => {
+                promise.setHandled(this.global.vm());
+                vm.waitForPromise(.{ .internal = promise });
+
+                switch (promise.status()) {
+                    .fulfilled => {
+                        this.result = .{ .success = 1, .@"error" = null };
+                    },
+                    .rejected => {
+                        const rejection = promise.result();
+                        this.result = this.runtime.captureException(this.global, rejection);
+                    },
+                    .pending => {
+                        this.result = .{ .success = 0, .@"error" = "entry point promise did not settle" };
+                    },
+                }
+            },
             .rejected => {
                 const rejection = promise.result();
                 this.result = this.runtime.captureException(this.global, rejection);
             },
-            else => {
+            .fulfilled => {
                 this.result = .{ .success = 1, .@"error" = null };
             },
         }
