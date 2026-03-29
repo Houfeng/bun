@@ -312,23 +312,23 @@ int main(void)
     printf("\n--- Evaluating JS ---\n");
     BunEvalResult r;
 
-    r = bun_eval_string(rt, "console.log('Hello from embedded Bun!')");
+    r = bun_eval_string(ctx, "console.log('Hello from embedded Bun!')");
     if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
 
-    r = bun_eval_string(rt, "console.log('nativeAdd(3, 4) =', nativeAdd(3, 4))");
+    r = bun_eval_string(ctx, "console.log('nativeAdd(3, 4) =', nativeAdd(3, 4))");
     if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
 
-    r = bun_eval_string(rt, "console.log(nativeGreet('Bun'))");
+    r = bun_eval_string(ctx, "console.log(nativeGreet('Bun'))");
     if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
 
-    r = bun_eval_string(rt,
+    r = bun_eval_string(ctx,
         "console.log('counter.value =', counter.value);"
         "counter.value = 42;"
         "console.log('counter.inc() =', counter.inc());"
         "console.log('counter.value =', counter.value);");
     if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
 
-    r = bun_eval_string(rt,
+    r = bun_eval_string(ctx,
         "console.log('label.text =', label.text);"
         "console.log('label.measure() =', label.measure());"
         "console.log('moveBy ->', label.moveBy(3, 4));"
@@ -338,7 +338,7 @@ int main(void)
     if (!r.success) fprintf(stderr, "Error: %s\n", r.error);
 
     // Demonstrate bun_call with error detection.
-    r = bun_eval_string(rt, "globalThis.throwingFn = () => { throw new Error('boom'); };");
+    r = bun_eval_string(ctx, "globalThis.throwingFn = () => { throw new Error('boom'); };");
     if (r.success) {
         BunValue throwing_fn = bun_get(ctx, global, "throwingFn", 10);
         BunValue result = bun_call(ctx, throwing_fn, BUN_UNDEFINED, 0, NULL);
@@ -349,7 +349,7 @@ int main(void)
     }
 
     // Schedule a timer to demonstrate event loop integration
-    r = bun_eval_string(rt,
+    r = bun_eval_string(ctx,
         "let count = 0;"
         "const timer = setInterval(() => {"
         "  count++;"
@@ -386,7 +386,7 @@ int main(void)
                 host_floats ? host_floats[0] : 0.0f);
         }
 
-        r = bun_eval_string(rt,
+        r = bun_eval_string(ctx,
             "const a = nativeFloats;"
             "console.log('Float32Array length:', a.length);"
             "let sum = 0; for (const x of a) sum += x;"
@@ -407,7 +407,7 @@ int main(void)
             bytes ? (unsigned)bytes[0] : 0);
     }
 
-    r = bun_eval_string(rt,
+    r = bun_eval_string(ctx,
         "const v = new DataView(nativeBuf);"
         "console.log('ArrayBuffer[0]:', v.getUint8(0).toString(16));"
         "console.log('ArrayBuffer length:', nativeBuf.byteLength);");

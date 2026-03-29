@@ -9,7 +9,7 @@
 ///   1. bun_initialize()
 ///   2. bun_context() to get JS context
 ///   3. Register values/functions on global object
-///   4. bun_eval_string()/bun_eval_file()
+///   4. bun_eval_string()/bun_eval_file() with that context
 ///   5. bun_run_pending_jobs() in host loop
 ///   6. bun_destroy()
 
@@ -131,7 +131,10 @@ BunRuntime* bun_initialize(const char* cwd);
 /// Destroy a Bun runtime and free all resources.
 void bun_destroy(BunRuntime* rt);
 
-/// Get the current JS context for this runtime.
+/// Get the unique JS context for this runtime.
+///
+/// Bun currently exposes exactly one context per runtime. This function does
+/// not create a new context; repeated calls return the same handle.
 BunContext* bun_context(BunRuntime* rt);
 
 // --------------------------------------------------------------------------
@@ -139,17 +142,17 @@ BunContext* bun_context(BunRuntime* rt);
 // --------------------------------------------------------------------------
 
 /// Evaluate a JavaScript/TypeScript expression or script.
-/// @param rt    Runtime handle.
+/// @param ctx   JS context.
 /// @param code  UTF-8 source code, null-terminated.
 /// @return      Evaluation result. The result and error strings are valid until
-///              the next bun_eval*/bun_run_pending_jobs call on this runtime.
-BunEvalResult bun_eval_string(BunRuntime* rt, const char* code);
+///              the next bun_eval*/bun_run_pending_jobs call on the owning runtime.
+BunEvalResult bun_eval_string(BunContext* ctx, const char* code);
 
 /// Load and evaluate a JavaScript/TypeScript file as an ES module.
-/// @param rt    Runtime handle.
+/// @param ctx   JS context.
 /// @param path  UTF-8 file path, null-terminated. Relative paths resolve from cwd.
 /// @return      Evaluation result.
-BunEvalResult bun_eval_file(BunRuntime* rt, const char* path);
+BunEvalResult bun_eval_file(BunContext* ctx, const char* path);
 
 // --------------------------------------------------------------------------
 // Event Loop Integration
@@ -419,7 +422,11 @@ BunValue bun_call(BunContext* ctx, BunValue fn, BunValue this_value, int argc, c
 /// bun_call()/bun_eval*() call. Returns NULL if no error is pending.
 const char* bun_last_error(BunContext* ctx);
 
-int bun_call_async(BunRuntime* rt, BunValue fn, BunValue this_value, int argc, const BunValue* argv);
+/// Queue a JavaScript function call to run on the context's owning runtime.
+///
+/// The call is executed later when the host drives bun_run_pending_jobs().
+/// Returns 1 if queued successfully, 0 on failure.
+int bun_call_async(BunContext* ctx, BunValue fn, BunValue this_value, int argc, const BunValue* argv);
 
 void bun_protect(BunContext* ctx, BunValue value);
 void bun_unprotect(BunContext* ctx, BunValue value);

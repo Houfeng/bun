@@ -419,14 +419,16 @@ pub export fn bun_context(rt: ?*BunRuntime) callconv(.c) ?*BunContext {
 // Evaluation
 // ---------------------------------------------------------------------------
 
-pub export fn bun_eval_string(rt: ?*BunRuntime, code_ptr: ?[*:0]const u8) callconv(.c) BunEvalResult {
-    const runtime = rt orelse return .{ .success = 0, .@"error" = "null runtime" };
+pub export fn bun_eval_string(ctx: ?*BunContext, code_ptr: ?[*:0]const u8) callconv(.c) BunEvalResult {
+    const global = toGlobal(ctx) orelse return .{ .success = 0, .@"error" = "null context" };
+    const runtime = vmToRuntime(global.bunVM()) orelse return .{ .success = 0, .@"error" = "context has no runtime" };
     runtime.freeLastError();
 
     const code = if (code_ptr) |p| std.mem.span(p) else return .{ .success = 0, .@"error" = "null code" };
 
     var eval_ctx = EvalContext{
         .runtime = runtime,
+        .global = global,
         .code = code,
         .result = .{ .success = 0, .@"error" = "eval did not complete" },
     };
@@ -436,16 +438,14 @@ pub export fn bun_eval_string(rt: ?*BunRuntime, code_ptr: ?[*:0]const u8) callco
 
 const EvalContext = struct {
     runtime: *BunRuntime,
+    global: *JSGlobalObject,
     code: []const u8,
     result: BunEvalResult,
 
     pub fn run(this: *EvalContext) void {
-        const vm = this.runtime.vm;
-        const global = vm.global;
-
         var exception: [1]JSValue = .{.js_undefined};
         const ret = JSModuleLoader.evaluate(
-            global,
+            this.global,
             this.code.ptr,
             this.code.len,
             "embed:eval",
@@ -457,7 +457,7 @@ const EvalContext = struct {
         );
 
         if (exception[0] != .js_undefined and exception[0] != .zero) {
-            this.result = this.runtime.captureException(global, exception[0]);
+            this.result = this.runtime.captureException(this.global, exception[0]);
         } else if (ret == .zero) {
             this.result = .{ .success = 0, .@"error" = "evaluation returned null" };
         } else {
@@ -466,14 +466,16 @@ const EvalContext = struct {
     }
 };
 
-pub export fn bun_eval_file(rt: ?*BunRuntime, path_ptr: ?[*:0]const u8) callconv(.c) BunEvalResult {
-    const runtime = rt orelse return .{ .success = 0, .@"error" = "null runtime" };
+pub export fn bun_eval_file(ctx: ?*BunContext, path_ptr: ?[*:0]const u8) callconv(.c) BunEvalResult {
+    const global = toGlobal(ctx) orelse return .{ .success = 0, .@"error" = "null context" };
+    const runtime = vmToRuntime(global.bunVM()) orelse return .{ .success = 0, .@"error" = "context has no runtime" };
     runtime.freeLastError();
 
     const path = if (path_ptr) |p| std.mem.span(p) else return .{ .success = 0, .@"error" = "null path" };
 
     var eval_ctx = EvalFileContext{
         .runtime = runtime,
+        .global = global,
         .path = path,
         .result = .{ .success = 0, .@"error" = "eval_file did not complete" },
     };
@@ -483,6 +485,7 @@ pub export fn bun_eval_file(rt: ?*BunRuntime, path_ptr: ?[*:0]const u8) callconv
 
 const EvalFileContext = struct {
     runtime: *BunRuntime,
+    global: *JSGlobalObject,
     path: []const u8,
     result: BunEvalResult,
 
@@ -497,7 +500,7 @@ const EvalFileContext = struct {
         switch (promise.status()) {
             .rejected => {
                 const rejection = promise.result();
-                this.result = this.runtime.captureException(vm.global, rejection);
+                this.result = this.runtime.captureException(this.global, rejection);
             },
             else => {
                 this.result = .{ .success = 1, .@"error" = null };
@@ -1144,13 +1147,14 @@ pub export fn bun_last_error(ctx: ?*BunContext) callconv(.c) ?[*:0]const u8 {
 }
 
 pub export fn bun_call_async(
-    rt: ?*BunRuntime,
+    ctx: ?*BunContext,
     fn_value: BunValue,
     this_value: BunValue,
     argc: c_int,
     argv: ?[*]const BunValue,
 ) callconv(.c) c_int {
-    const runtime = rt orelse return 0;
+    const global = toGlobal(ctx) orelse return 0;
+    const runtime = vmToRuntime(global.bunVM()) orelse return 0;
     const argc_u: usize = if (argc > 0) @intCast(argc) else 0;
 
     var arg_copy: []BunValue = &.{};
