@@ -118,15 +118,37 @@ typedef struct {
 /// return value from a successful call.
 #define BUN_EXCEPTION ((BunValue)0ULL)
 
+/// Debugger startup mode for bun_initialize().
+typedef enum {
+    BUN_DEBUGGER_OFF = 0,
+    /// Start the inspector and begin executing immediately.
+    BUN_DEBUGGER_ATTACH = 1,
+    /// Start the inspector and wait for a debugger client before executing.
+    BUN_DEBUGGER_WAIT = 2,
+    /// Wait for a debugger client and pause on the first line.
+    BUN_DEBUGGER_BREAK = 3,
+} BunDebuggerMode;
+
+/// Initialization options for bun_initialize().
+typedef struct {
+    /// Working directory (UTF-8, null-terminated). Pass NULL for current dir.
+    const char* cwd;
+    /// Debugger startup mode. Zero / BUN_DEBUGGER_OFF disables debugging.
+    BunDebuggerMode debugger_mode;
+    /// Optional inspector listen URL or path (for example tcp://127.0.0.1:6499
+    /// or unix:///tmp/bun-debug.sock). Pass NULL to use Bun's default.
+    const char* debugger_listen_url;
+} BunInitializeOptions;
+
 // --------------------------------------------------------------------------
 // Lifecycle
 // --------------------------------------------------------------------------
 
 /// Initialize a Bun runtime instance. Must be called from the thread that will
 /// drive the event loop (typically the main/GUI thread).
-/// @param cwd  Working directory (UTF-8, null-terminated). Pass NULL for current dir.
+/// @param options  Initialization options, or NULL for defaults.
 /// @return  Runtime handle, or NULL on failure.
-BunRuntime* bun_initialize(const char* cwd);
+BunRuntime* bun_initialize(const BunInitializeOptions* options);
 
 /// Destroy a Bun runtime and free all resources.
 void bun_destroy(BunRuntime* rt);

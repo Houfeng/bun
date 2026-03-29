@@ -171,6 +171,19 @@ const BunEvalResult = extern struct {
     @"error": ?[*:0]const u8,
 };
 
+const BunDebuggerMode = enum(c_int) {
+    off = 0,
+    attach = 1,
+    wait = 2,
+    @"break" = 3,
+};
+
+const BunInitializeOptions = extern struct {
+    cwd: ?[*:0]const u8,
+    debugger_mode: BunDebuggerMode,
+    debugger_listen_url: ?[*:0]const u8,
+};
+
 const HostFnMap = std.AutoHashMapUnmanaged(JSValue, *HostFnData);
 const OpaqueMap = std.AutoHashMapUnmanaged(JSValue, OpaqueEntry);
 
@@ -321,11 +334,27 @@ const BUN_ACCESSOR_DONT_DELETE: u32 = 1 << 2;
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-pub export fn bun_initialize(cwd_ptr: ?[*:0]const u8) callconv(.c) ?*BunRuntime {
-    return initializeImpl(cwd_ptr) catch null;
+pub export fn bun_initialize(options: ?*const BunInitializeOptions) callconv(.c) ?*BunRuntime {
+    return initializeImpl(options) catch null;
 }
 
-fn initializeImpl(cwd_ptr: ?[*:0]const u8) !?*BunRuntime {
+fn debuggerFromOptions(options: ?*const BunInitializeOptions) bun.cli.Command.Debugger {
+    const opts = options orelse return .{ .unspecified = {} };
+    const path_or_port = if (opts.debugger_listen_url) |value| std.mem.span(value) else "";
+
+    return switch (opts.debugger_mode) {
+        .off => .{ .unspecified = {} },
+        .attach => .{ .enable = .{ .path_or_port = path_or_port } },
+        .wait => .{ .enable = .{ .path_or_port = path_or_port, .wait_for_connection = true } },
+        .@"break" => .{ .enable = .{
+            .path_or_port = path_or_port,
+            .wait_for_connection = true,
+            .set_breakpoint_on_first_line = true,
+        } },
+    };
+}
+
+fn initializeImpl(options: ?*const BunInitializeOptions) !?*BunRuntime {
     // Crash handler (idempotent)
     bun.crash_handler.init();
 
@@ -363,14 +392,15 @@ fn initializeImpl(cwd_ptr: ?[*:0]const u8) !?*BunRuntime {
     };
 
     // Set the working directory if provided
-    if (cwd_ptr) |cwd| {
+    if (options) |opts| if (opts.cwd) |cwd| {
         args.absolute_working_dir = std.mem.span(cwd);
-    }
+    };
 
     // Create the VM
     const vm = try VirtualMachine.init(.{
         .allocator = allocator,
         .args = args,
+        .debugger = debuggerFromOptions(options),
         .is_main_thread = true,
     });
 
