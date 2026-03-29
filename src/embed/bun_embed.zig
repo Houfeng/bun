@@ -354,6 +354,12 @@ fn debuggerFromOptions(options: ?*const BunInitializeOptions) bun.cli.Command.De
     };
 }
 
+fn initializeEmbedOutput() void {
+    const stdout = bun.sys.File.from(std.fs.File.stdout());
+    const stderr = bun.sys.File.from(std.fs.File.stderr());
+    bun.Output.Source.setInit(stdout, stderr);
+}
+
 fn initializeImpl(options: ?*const BunInitializeOptions) !?*BunRuntime {
     // Crash handler (idempotent)
     bun.crash_handler.init();
@@ -395,6 +401,10 @@ fn initializeImpl(options: ?*const BunInitializeOptions) !?*BunRuntime {
     if (options) |opts| if (opts.cwd) |cwd| {
         args.absolute_working_dir = std.mem.span(cwd);
     };
+
+    // Bind Bun's output streams to the host process stdio without running the
+    // CLI stdio bootstrap, which would mutate global process state.
+    initializeEmbedOutput();
 
     // Create the VM
     const vm = try VirtualMachine.init(.{
