@@ -490,7 +490,10 @@ const EvalContext = struct {
 
         if (exception[0] != .js_undefined and exception[0] != .zero) {
             this.result = this.runtime.captureException(this.global, exception[0]);
-        } else if (ret.asAnyPromise()) |promise| {
+            return;
+        }
+
+        if (ret.asAnyPromise()) |promise| {
             promise.setHandled(this.global.vm());
             this.runtime.vm.waitForPromise(promise);
 
@@ -508,7 +511,9 @@ const EvalContext = struct {
                     return;
                 },
             }
-        } else if (this.global.tryTakeException()) |exc| {
+        }
+
+        if (this.global.tryTakeException()) |exc| {
             this.result = this.runtime.captureException(this.global, exc);
         } else if (final_result == .zero) {
             this.result = .{ .success = 0, .@"error" = "evaluation returned null" };
