@@ -488,6 +488,8 @@ const EvalContext = struct {
 
         if (exception[0] != .js_undefined and exception[0] != .zero) {
             this.result = this.runtime.captureException(this.global, exception[0]);
+        } else if (this.global.tryTakeException()) |exc| {
+            this.result = this.runtime.captureException(this.global, exc);
         } else if (ret == .zero) {
             this.result = .{ .success = 0, .@"error" = "evaluation returned null" };
         } else {
@@ -523,7 +525,11 @@ const EvalFileContext = struct {
         const vm = this.runtime.vm;
 
         const promise = vm.loadEntryPoint(this.path) catch {
-            this.result = .{ .success = 0, .@"error" = "failed to load entry point" };
+            if (this.global.tryTakeException()) |exc| {
+                this.result = this.runtime.captureException(this.global, exc);
+            } else {
+                this.result = .{ .success = 0, .@"error" = "failed to load entry point" };
+            }
             return;
         };
 
